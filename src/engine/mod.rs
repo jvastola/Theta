@@ -1,0 +1,311 @@
+pub mod schedule;
+
+use crate::ecs::World;
+use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
+use crate::vr::{NullVrBridge, VrBridge};
+use schedule::{Scheduler, Stage, System};
+use std::time::Instant;
+
+const DEFAULT_MAX_FRAMES: u32 = 3;
+
+pub struct Engine {
+    scheduler: Scheduler,
+    renderer: Renderer,
+    target_frame_time: f32,
+    max_frames: u32,
+}
+
+impl Engine {
+    pub fn new() -> Self {
+        let mut config = RendererConfig::default();
+        if cfg!(feature = "render-wgpu") {
+            config.backend = BackendKind::Wgpu;
+        }
+        Self::with_renderer_config(config)
+    }
+
+    pub fn with_renderer_config(config: RendererConfig) -> Self {
+        let scheduler = Scheduler::default();
+        let renderer = Self::build_renderer(config);
+
+        let mut engine = Self {
+            scheduler,
+            renderer,
+            target_frame_time: 1.0 / 60.0,
+            max_frames: DEFAULT_MAX_FRAMES,
+        };
+
+        engine.register_core_systems();
+        engine
+    }
+
+    pub fn with_backend(backend: BackendKind) -> Self {
+        let mut config = RendererConfig::default();
+        config.backend = backend;
+        Self::with_renderer_config(config)
+    }
+
+    pub fn add_system<S>(&mut self, stage: Stage, name: &'static str, system: S)
+    where
+        S: System + 'static,
+    {
+        self.scheduler.add_system(stage, name, system);
+    }
+
+    pub fn add_system_fn<F>(&mut self, stage: Stage, name: &'static str, func: F)
+    where
+        F: FnMut(&mut World, f32) + Send + 'static,
+    {
+        self.scheduler.add_system_fn(stage, name, func);
+    }
+
+    pub fn add_parallel_system_fn<F>(&mut self, stage: Stage, name: &'static str, func: F)
+    where
+        F: Fn(&World, f32) + Send + Sync + 'static,
+    {
+        self.scheduler.add_parallel_system_fn(stage, name, func);
+    }
+
+    pub fn configure_max_frames(&mut self, frames: u32) {
+        self.max_frames = frames.max(1);
+    }
+
+    pub fn run(&mut self) {
+        let mut last_frame = Instant::now();
+        for _ in 0..self.max_frames {
+            let now = Instant::now();
+            let raw_delta = now.duration_since(last_frame).as_secs_f32();
+            let delta_seconds = if raw_delta == 0.0 {
+                self.target_frame_time
+            } else {
+                raw_delta
+            };
+            last_frame = now;
+
+            self.scheduler.tick(delta_seconds);
+
+            if let Err(err) = self.renderer.render(delta_seconds) {
+                eprintln!("[engine] render error: {err}");
+            }
+        }
+    }
+
+    pub fn world(&self) -> &crate::ecs::World {
+        self.scheduler.world()
+    }
+
+    pub fn world_mut(&mut self) -> &mut crate::ecs::World {
+        self.scheduler.world_mut()
+    }
+
+    fn register_core_systems(&mut self) {
+        {
+            let world = self.scheduler.world_mut();
+            world.register_component::<FrameStats>();
+            world.register_component::<Transform>();
+            world.register_component::<Velocity>();
+            world.register_component::<EditorSelection>();
+        }
+
+        let stats_entity = {
+            let world = self.scheduler.world_mut();
+            initialize_frame_stats(world)
+        };
+
+        let actor_entity = {
+            let world = self.scheduler.world_mut();
+            initialize_actor(world)
+        };
+
+        let editor_entity = {
+            let world = self.scheduler.world_mut();
+            initialize_editor_state(world, actor_entity)
+        };
+
+        self.add_system_fn(
+            Stage::Simulation,
+            "integrate_velocity",
+            move |world, delta| {
+                let velocity = world.get::<Velocity>(actor_entity).copied();
+                if let (Some(transform), Some(velocity)) =
+                    (world.get_mut::<Transform>(actor_entity), velocity)
+                {
+                    transform.integrate(&velocity, delta);
+                }
+            },
+        );
+
+        self.add_system_fn(Stage::Render, "frame_stats", move |world, delta| {
+            let actor_position = world
+                .get::<Transform>(actor_entity)
+                .map(|transform| transform.position);
+            if let Some(stats) = world.get_mut::<FrameStats>(stats_entity) {
+                stats.frames += 1;
+                stats.total_time += delta;
+                stats.average_frame_time = stats.total_time / stats.frames as f32;
+
+                if let Some(position) = actor_position {
+                    stats.last_actor_position = position;
+                }
+
+                println!(
+                    "[engine] frame {} avg {:.4}s pos {:?}",
+                    stats.frames, stats.average_frame_time, stats.last_actor_position
+                );
+            }
+        });
+
+        self.add_system_fn(Stage::Editor, "cycle_selection", move |world, _delta| {
+            if let Some(selection) = world.get_mut::<EditorSelection>(editor_entity) {
+                selection.frames_since_change += 1;
+                if selection.frames_since_change >= selection.highlight_interval {
+                    selection.frames_since_change = 0;
+                    selection.highlight_active = !selection.highlight_active;
+                }
+            }
+        });
+
+        self.add_parallel_system_fn(Stage::Editor, "editor_debug_view", move |world, _| {
+            if let Some(selection) = world.get::<EditorSelection>(editor_entity) {
+                if let Some(entity) = selection.primary {
+                    if let Some(transform) = world.get::<Transform>(entity) {
+                        println!(
+                            "[editor] selection {:?} transform {:?} highlight {}",
+                            entity, transform.position, selection.highlight_active
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    fn build_renderer(config: RendererConfig) -> Renderer {
+        let backend = Self::create_backend(config.backend);
+        let vr: Box<dyn VrBridge> = Box::new(NullVrBridge::default());
+        Renderer::new(config, backend, vr)
+    }
+
+    fn create_backend(kind: BackendKind) -> Box<dyn GpuBackend> {
+        match kind {
+            BackendKind::Null => Box::new(NullGpuBackend::default()),
+            BackendKind::Wgpu => {
+                #[cfg(feature = "render-wgpu")]
+                {
+                    match crate::render::wgpu_backend::WgpuBackend::initialize() {
+                        Ok(backend) => Box::new(backend) as Box<dyn GpuBackend>,
+                        Err(err) => {
+                            eprintln!(
+                                "[engine] failed to initialize wgpu backend ({err}); falling back to Null"
+                            );
+                            Box::new(NullGpuBackend::default())
+                        }
+                    }
+                }
+
+                #[cfg(not(feature = "render-wgpu"))]
+                {
+                    eprintln!(
+                        "[engine] wgpu backend requested but 'render-wgpu' feature is disabled; falling back to Null"
+                    );
+                    Box::new(NullGpuBackend::default())
+                }
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct FrameStats {
+    frames: u64,
+    total_time: f32,
+    average_frame_time: f32,
+    last_actor_position: [f32; 3],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Transform {
+    position: [f32; 3],
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self {
+            position: [0.0, 1.6, 0.0],
+        }
+    }
+}
+
+impl Transform {
+    fn integrate(&mut self, velocity: &Velocity, delta: f32) {
+        for (value, vel) in self.position.iter_mut().zip(velocity.linear.iter()) {
+            *value += *vel * delta;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Velocity {
+    linear: [f32; 3],
+}
+
+impl Default for Velocity {
+    fn default() -> Self {
+        Self {
+            linear: [0.2, 0.0, 0.1],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EditorSelection {
+    primary: Option<crate::ecs::Entity>,
+    frames_since_change: u32,
+    highlight_interval: u32,
+    highlight_active: bool,
+}
+
+impl Default for EditorSelection {
+    fn default() -> Self {
+        Self {
+            primary: None,
+            frames_since_change: 0,
+            highlight_interval: 120,
+            highlight_active: true,
+        }
+    }
+}
+
+fn initialize_frame_stats(world: &mut World) -> crate::ecs::Entity {
+    let entity = world.spawn();
+    world
+        .insert(entity, FrameStats::default())
+        .expect("frame stats component should insert");
+    entity
+}
+
+fn initialize_actor(world: &mut World) -> crate::ecs::Entity {
+    let entity = world.spawn();
+    world
+        .insert(entity, Transform::default())
+        .expect("transform component");
+    world
+        .insert(entity, Velocity::default())
+        .expect("velocity component");
+    entity
+}
+
+fn initialize_editor_state(world: &mut World, primary: crate::ecs::Entity) -> crate::ecs::Entity {
+    let mut selection = EditorSelection::default();
+    selection.primary = Some(primary);
+    let entity = world.spawn();
+    world
+        .insert(entity, selection)
+        .expect("editor selection component");
+    entity
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
