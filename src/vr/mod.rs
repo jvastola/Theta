@@ -322,4 +322,16 @@ mod tests {
         let err = bridge.present(VrFrameSubmission::default()).unwrap_err();
         assert!(err.to_string().contains("expected"));
     }
+
+    #[test]
+    fn simulated_input_provider_animates_samples() {
+        let mut provider = SimulatedInputProvider::default();
+        let first = provider.sample(0.1);
+        let second = provider.sample(0.1);
+
+        assert!(first.left.trigger >= 0.0 && first.left.trigger <= 1.0);
+        assert!(second.left.trigger >= 0.0 && second.left.trigger <= 1.0);
+        assert_ne!(first.left.trigger, second.left.trigger);
+        assert_ne!(first.head.position, second.head.position);
+    }
 }

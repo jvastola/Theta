@@ -339,4 +339,34 @@ mod tests {
         assert_eq!(public_key.len(), 32);
         assert!(public_key.iter().all(|byte| *byte == 9));
     }
+
+    #[test]
+    fn advertised_components_deduplicate_between_change_sets() {
+        let mut session = NetworkSession::new();
+        let descriptor = ComponentDescriptor {
+            key: ComponentKey::of::<Position>(),
+        };
+
+        session.advertise_component(descriptor.clone());
+        session.advertise_component(descriptor.clone());
+
+        let first = session.craft_change_set(Vec::new());
+        assert_eq!(first.descriptors.len(), 1);
+
+        let second = session.craft_change_set(Vec::new());
+        assert!(second.descriptors.is_empty());
+    }
+
+    #[test]
+    fn change_set_sequence_monotonic() {
+        let mut session = NetworkSession::new();
+        let entity = Entity::new(7, 2);
+        let diff = ComponentDiff::update::<Position>(entity, vec![42]);
+
+        let first = session.craft_change_set(vec![diff.clone()]);
+        let second = session.craft_change_set(vec![diff]);
+
+        assert_eq!(first.sequence + 1, second.sequence);
+        assert!(first.timestamp_ms <= second.timestamp_ms);
+    }
 }

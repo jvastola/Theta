@@ -452,4 +452,45 @@ mod tests {
         assert_eq!(render_stage.sequential_systems.len(), 1);
         assert_eq!(render_stage.parallel_count, 0);
     }
+
+    #[test]
+    fn profile_contains_all_stages_even_without_systems() {
+        let mut scheduler = Scheduler::default();
+        scheduler.tick(0.0);
+
+        let profile = scheduler.last_profile().clone();
+        assert_eq!(profile.stages().len(), Stage::count());
+
+        for stage in Stage::ordered() {
+            let stage_profile = profile.stage(stage).expect("profile entry");
+            assert_eq!(stage_profile.parallel_count, 0);
+            assert!(stage_profile.sequential_systems.is_empty());
+        }
+    }
+
+    #[test]
+    fn profile_tracks_parallel_and_sequential_systems() {
+        let mut scheduler = Scheduler::default();
+        let flag = Arc::new(AtomicUsize::new(0));
+        let seq_flag = flag.clone();
+
+        scheduler.add_system_fn(Stage::Editor, "seq", move |_, _| {
+            seq_flag.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let par_flag = flag.clone();
+        scheduler.add_parallel_system_fn(Stage::Editor, "par", move |_, _| {
+            par_flag.fetch_add(1, Ordering::SeqCst);
+        });
+
+        scheduler.tick(0.016);
+
+        assert!(flag.load(Ordering::SeqCst) >= 2);
+
+        let profile = scheduler.last_profile().clone();
+        let editor = profile.stage(Stage::Editor).expect("editor profile");
+        assert_eq!(editor.sequential_systems.len(), 1);
+        assert_eq!(editor.parallel_count, 1);
+        assert!(editor.total >= editor.sequential_total);
+    }
 }

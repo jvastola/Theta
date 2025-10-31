@@ -505,6 +505,7 @@ pub mod wgpu_backend {
 mod tests {
     use super::*;
     use crate::vr::{NullVrBridge, VrBridge};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn null_pipeline_advances_frame_index() {
@@ -516,5 +517,100 @@ mod tests {
             .render(0.016)
             .expect("null pipeline should not fail");
         assert_eq!(renderer.frame_index(), 1);
+    }
+
+    struct TestBackend {
+        forced_frame_index: Option<u64>,
+        log: Option<Arc<Mutex<Vec<FrameInputs>>>>,
+    }
+
+    impl TestBackend {
+        fn new() -> Self {
+            Self {
+                forced_frame_index: None,
+                log: None,
+            }
+        }
+
+        fn with_forced_index(mut self, frame_index: u64) -> Self {
+            self.forced_frame_index = Some(frame_index);
+            self
+        }
+
+        fn with_log(mut self, log: Arc<Mutex<Vec<FrameInputs>>>) -> Self {
+            self.log = Some(log);
+            self
+        }
+    }
+
+    impl GpuBackend for TestBackend {
+        fn label(&self) -> &'static str {
+            "Test Backend"
+        }
+
+        fn render_frame(
+            &mut self,
+            inputs: &FrameInputs,
+            views: &VrViewConfig,
+        ) -> RenderResult<RenderSubmission> {
+            if let Some(log) = &self.log {
+                log.lock().unwrap().push(*inputs);
+            }
+
+            let frame_index = self.forced_frame_index.unwrap_or(inputs.frame_index);
+            let surfaces = views
+                .views
+                .iter()
+                .enumerate()
+                .map(|(eye, view)| SurfaceHandle {
+                    id: eye as u64,
+                    size: view.resolution,
+                })
+                .collect();
+
+            Ok(RenderSubmission {
+                frame_index,
+                vr_submission: VrFrameSubmission { surfaces },
+                #[cfg(feature = "render-wgpu")]
+                gpu_submission: None,
+            })
+        }
+    }
+
+    #[test]
+    fn renderer_detects_out_of_order_frames() {
+        let backend: Box<dyn GpuBackend> = Box::new(TestBackend::new().with_forced_index(0));
+        let vr: Box<dyn VrBridge> = Box::new(NullVrBridge::default());
+        let mut renderer = Renderer::new(RendererConfig::default(), backend, vr);
+
+        let err = renderer
+            .render(0.016)
+            .expect_err("should detect out-of-order frames");
+        match err {
+            RenderError::FrameOutOfOrder { expected, got } => {
+                assert_eq!(expected, 1);
+                assert_eq!(got, 0);
+            }
+            other => panic!("unexpected render error: {other}"),
+        }
+    }
+
+    #[test]
+    fn renderer_passes_delta_and_elapsed_to_backend() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let backend: Box<dyn GpuBackend> = Box::new(TestBackend::new().with_log(log.clone()));
+        let vr: Box<dyn VrBridge> = Box::new(NullVrBridge::default());
+        let mut renderer = Renderer::new(RendererConfig::default(), backend, vr);
+
+        renderer.render(0.25).expect("first frame OK");
+        renderer.render(0.5).expect("second frame OK");
+
+        let records = log.lock().unwrap().clone();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].frame_index, 1);
+        assert_eq!(records[0].delta_seconds, 0.25);
+        assert_eq!(records[0].elapsed_seconds, 0.25);
+        assert_eq!(records[1].frame_index, 2);
+        assert_eq!(records[1].elapsed_seconds, 0.75);
     }
 }

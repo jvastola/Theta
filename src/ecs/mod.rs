@@ -225,6 +225,9 @@ mod tests {
     #[derive(Debug, PartialEq)]
     struct Velocity(f32, f32, f32);
 
+    #[derive(Debug, PartialEq)]
+    struct Health(u32);
+
     #[test]
     fn spawn_and_insert_component() {
         let mut world = World::new();
@@ -264,5 +267,28 @@ mod tests {
         assert_ne!(entity_a, entity_b);
         assert_eq!(entity_a.index(), entity_b.index());
         assert_ne!(entity_a.generation(), entity_b.generation());
+    }
+
+    #[test]
+    fn insert_auto_registers_storage() {
+        let mut world = World::new();
+        let entity = world.spawn();
+
+        world
+            .insert(entity, Health(42))
+            .expect("entity should be valid");
+
+        assert_eq!(world.get::<Health>(entity), Some(&Health(42)));
+    }
+
+    #[test]
+    fn despawn_invalid_entity_fails() {
+        let mut world = World::new();
+        let stale = Entity::new(999, 1);
+
+        let err = world.despawn(stale).expect_err("stale entity should error");
+        match err {
+            EcsError::NoSuchEntity(entity) => assert_eq!(entity, stale),
+        }
     }
 }
