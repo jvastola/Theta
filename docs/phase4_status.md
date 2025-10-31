@@ -1,7 +1,7 @@
 # Phase 4 Status Report: Command Log & Conflict Resolution
 
 **Date:** October 31, 2025  
-**Status:** 🔄 90% Complete  
+**Status:** 🔄 93% Complete  
 **Target Completion:** November 7, 2025
 
 ## Executive Summary
@@ -10,7 +10,7 @@ Phase 4 delivers an authoritative, signed command log enabling deterministic con
 
 ---
 
-## ✅ Completed Work (90%)
+## ✅ Completed Work (93%)
 
 ### 1. Command Log Core (`src/network/command_log.rs`)
 
@@ -139,51 +139,42 @@ Phase 4 delivers an authoritative, signed command log enabling deterministic con
 
 ---
 
-## 🔄 Remaining Work (15%)
+### 5. QUIC Transport & Remote Apply (`src/network/transport.rs`, `src/engine/mod.rs`)
 
-### 1. Transport Broadcast & Receive (Priority: Critical) ✅ COMPLETED
-**Estimated Effort:** 2 days (Nov 1-3) → **Actual: 1 day (Oct 31)**
+#### Features Implemented:
+- **Replication Stream Framing**
+   - ✅ Length-prefixed frames with kind byte (0x01 commands, 0x02 component deltas)
+   - ✅ Command packets serialized to JSON payloads via `CommandPacket`
+   - ✅ Unknown frame kinds logged and ignored (protocol resilience)
 
-#### Tasks:
-- [x] **QUIC Stream Integration**
-  - ✅ Implemented `TransportSession::send_command_packets(packets: &[CommandPacket])`
-  - ✅ Hooked into replication stream (Stream 1) with length-prefixed framing
-  - ✅ Added frame kind discriminator (0x01 for commands, 0x02 for deltas)
-  - ✅ Packet sequence tracking via metrics handle
+- **Async Runtime Bridge**
+   - ✅ `Engine::attach_transport_session` spawns single-thread Tokio runtime on demand
+   - ✅ `TransportSession::send_command_packets` invoked via `block_on` within frame tick
+   - ✅ Failed sends re-enqueued to `CommandTransportQueue`
 
-- [x] **Receive Pipeline**
-  - ✅ Implemented `TransportSession::receive_command_packet() -> Option<CommandPacket>`
-  - ✅ Deserialize incoming packets from replication stream
-  - ✅ Generalized replication frame decoding with `DecodedReplicationFrame` enum
-  - ✅ Skips component delta frames while awaiting commands
-  - ✅ Logs unknown frame types for debugging
+- **Remote Command Polling**
+   - ✅ `Engine::poll_remote_commands` drains replication stream each frame
+   - ✅ `CommandPipeline::integrate_remote_packet` updates Lamport tracking and avoids replays
+   - ✅ Remote entries dispatched to world through `apply_remote_entries`
 
-- [x] **Engine Integration**
-  - ✅ Added `Engine::attach_transport_session(session: TransportSession)`
-  - ✅ Lazy Tokio runtime initialization for async sends
-  - ✅ Automatic drain of `CommandTransportQueue` when session attached
-  - ✅ `block_on` pattern for synchronous frame tick integration
-  - ✅ Re-enqueues packets on transmission failure
+- **World State Application**
+   - ✅ Selection highlight commands deserialize into `SelectionHighlightCommand`
+   - ✅ `EditorSelection` component updated (primary handle + highlight_active)
+   - ✅ Frames-since-change reset to keep highlight blinking cadence consistent
 
-- [x] **Error Handling**
-  - ✅ Transmission errors logged with `log::error!`
-  - ✅ Failed packets re-queued for retry
-  - ✅ Malformed frame detection with protocol error
+#### Test Coverage:
+- ✅ `command_packets_roundtrip_over_replication_stream`: QUIC send/receive loopback
+- ✅ `replication_frame_decoding_classifies_component_delta`: framing classification
+- ✅ `engine::commands::tests::integrates_remote_packet_and_updates_lamport`: Lamport advancement after remote integrate
+- ✅ `engine::tests::apply_remote_selection_highlight_updates_world`: remote apply mutates ECS state
 
-- [x] **Testing**
-  - ✅ Test: `command_packets_roundtrip_over_replication_stream` validates loopback
-  - ✅ Test: `replication_frame_decoding_classifies_component_delta` validates framing
-  - ✅ Test sends component delta frame before command to verify skipping logic
-
-#### Acceptance Criteria:
-- ✅ Command packets successfully transmitted over QUIC loopback
-- ⚠️ World state convergence deferred (needs remote command apply implementation)
-- ✅ Framing errors handled gracefully (unknown types logged, not crashed)
-- ⚠️ Multi-client concurrent editing test deferred to integration suite
+**Lines of Code:** ~180 (transport/engine) + ~120 (tests)
 
 ---
 
-### 2. Command Metrics & Telemetry (Priority: High)
+## 🔄 Remaining Work (10%)
+
+### 1. Command Metrics & Telemetry (Priority: High)
 **Estimated Effort:** 1.5 days (Nov 1-3)
 
 #### Tasks:
@@ -213,7 +204,7 @@ Phase 4 delivers an authoritative, signed command log enabling deterministic con
 
 ---
 
-### 3. Additional Editor Commands (Priority: Medium)
+### 2. Additional Editor Commands (Priority: Medium)
 **Estimated Effort:** 1.5 days (Nov 4-5)
 
 #### Tasks:
@@ -304,6 +295,11 @@ Phase 4 delivers an authoritative, signed command log enabling deterministic con
    - Tradeoff: Blocking async calls on frame boundary acceptable for low-frequency commands
    - Future: Move transport to dedicated thread pool if send latency impacts frame rate
 
+7. **Remote Command Apply Routing**
+   - Decision: Explicit match inside `apply_remote_entries` for each supported command type
+   - Rationale: Keeps ECS updates deterministic and auditable without dynamic dispatch
+   - Tradeoff: Requires updating match arms as new commands are added; mitigated by targeted unit tests
+
 ### Known Issues:
 
 1. **No Nonce-Based Replay Protection**
@@ -324,11 +320,11 @@ Phase 4 delivers an authoritative, signed command log enabling deterministic con
    - Mitigation: Add 64KB payload limit in transport receive path
    - Priority: Medium (add in future iteration)
 
-4. **Remote Command Apply Not Yet Implemented**
-   - Current: `receive_command_packet` retrieves packets but no automatic apply
-   - Risk: Commands accumulate without integration into world state
-   - Mitigation: Add `Engine::process_remote_commands` in Nov 1-3
-   - Priority: High (required for world state convergence)
+4. **Remote Command Apply Coverage Limited**
+  - Current: Engine applies selection highlight commands; other editor verbs still pending
+  - Risk: Future command types may not replicate until apply handlers exist
+  - Mitigation: Extend `apply_remote_entries` match arms as new commands land
+  - Priority: Medium (sufficient for current highlight workflow)
 
 ---
 
@@ -342,7 +338,7 @@ Phase 4 delivers an authoritative, signed command log enabling deterministic con
 - [x] Command pipeline integration
 - [x] CommandOutbox and TransportQueue wiring
 - [x] QUIC transport broadcast/receive
-- [ ] Remote command apply to world state
+- [x] Remote command apply to world state
 
 ### Telemetry & Metrics:
 - [ ] Command append rate tracking
@@ -363,6 +359,7 @@ Phase 4 delivers an authoritative, signed command log enabling deterministic con
 - [x] Unit tests for outbox/queue (3 tests)
 - [x] Integration tests (2 tests)
 - [x] Transport loopback tests (2 tests: roundtrip, framing)
+- [x] Remote command apply unit tests (engine highlight sync, pipeline lamport advance)
 - [ ] Metrics instrumentation tests (2 tests)
 - [ ] Additional editor command tests (3 tests)
 
@@ -419,9 +416,9 @@ Phase 4 delivers an authoritative, signed command log enabling deterministic con
 | Date | Milestone | Tasks | Status |
 |------|-----------|-------|--------|
 | Oct 31 | Transport Broadcast/Receive | QUIC send/receive, replication stream framing, engine integration | ✅ Complete |
-| Nov 1 | Metrics Core | Append rate, conflict counters, queue depth tracking | 🔄 In Progress |
+| Nov 1 | Metrics Core | Append rate, conflict counters, queue depth tracking | Planned |
 | Nov 2 | Telemetry Integration | Overlay display, TransportDiagnostics extension | Planned |
-| Nov 3 | Remote Command Apply | Engine receive pipeline, world state integration | Planned |
+| Nov 3 | Remote Command Apply | Engine receive pipeline, world state integration | ✅ Complete (Pulled into Oct 31) |
 | Nov 4 | Transform Commands | Translate, rotate, scale command implementation | Planned |
 | Nov 5 | Phase 4 Wrap-Up | Tool state commands, documentation, final testing | Planned |
 
@@ -458,12 +455,12 @@ Phase 4 delivers an authoritative, signed command log enabling deterministic con
 
 ## Conclusion
 
-Phase 4 is **ahead of schedule** with **90% completion as of October 31**. Core functionality is complete with robust test coverage. QUIC transport integration finished one day ahead of timeline. Remaining work focuses on telemetry metrics, remote command apply logic, and expanded editor commands—all low-risk tasks.
+Phase 4 remains **ahead of schedule** with **93% completion as of October 31**. Core functionality now covers end-to-end command replication: transport send/receive, engine queue flush, and remote apply for selection highlights. Remaining work focuses on telemetry metrics and expanded editor commands—both scoped and low-risk.
 
 **Next Steps:**
 1. ~~Complete transport broadcast/receive (Nov 1-3)~~ ✅ Done Oct 31
-2. Integrate telemetry metrics (Nov 1-2)
-3. Implement remote command apply pipeline (Nov 3)
+2. ~~Implement remote command apply pipeline (Nov 3)~~ ✅ Done Oct 31
+3. Integrate telemetry metrics (Nov 1-2)
 4. Add editor command vocabulary (Nov 4-5)
 5. Phase 4 review and Phase 5 kickoff (Nov 6)
 

@@ -3,10 +3,11 @@ pub mod schedule;
 
 use self::commands::CommandPipeline;
 use crate::ecs::World;
+use crate::editor::commands::{CMD_SELECTION_HIGHLIGHT, SelectionHighlightCommand};
 use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
 use crate::editor::{CommandOutbox, CommandTransportQueue};
 use crate::network::EntityHandle;
-use crate::network::command_log::{CommandBatch, CommandPacket};
+use crate::network::command_log::{CommandBatch, CommandEntry, CommandPacket, CommandScope};
 #[cfg(feature = "network-quic")]
 use crate::network::transport::TransportSession;
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
@@ -18,6 +19,8 @@ use crate::vr::{
 use schedule::{Scheduler, Stage, System};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "network-quic")]
+use std::time::Duration;
 use std::time::Instant;
 #[cfg(feature = "network-quic")]
 use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
@@ -540,6 +543,9 @@ impl Engine {
         let profile = self.scheduler.last_profile().clone();
         let mut telemetry_sample = None;
 
+        #[cfg(feature = "network-quic")]
+        self.poll_remote_commands();
+
         if let Some(stats_entity) = self.frame_stats_entity {
             if let Some(stats) = self
                 .scheduler
@@ -726,6 +732,126 @@ impl Engine {
             }
         }
     }
+
+    #[cfg(feature = "network-quic")]
+    fn poll_remote_commands(&mut self) {
+        let session = match self.transport_session.as_ref() {
+            Some(session) => session,
+            None => return,
+        };
+
+        loop {
+            let packet_result = {
+                let runtime = self.network_runtime.get_or_insert_with(|| {
+                    TokioRuntimeBuilder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("create network runtime")
+                });
+                runtime.block_on(session.receive_command_packet(Duration::from_millis(0)))
+            };
+
+            let packet = match packet_result {
+                Ok(Some(packet)) => packet,
+                Ok(None) => break,
+                Err(err) => {
+                    log::error!("[transport] failed to receive command packet: {err}");
+                    break;
+                }
+            };
+
+            let applied_entries = match self.command_pipeline.lock() {
+                Ok(mut pipeline) => match pipeline.integrate_remote_packet(&packet) {
+                    Ok(entries) => entries,
+                    Err(err) => {
+                        log::error!(
+                            "[commands] failed to integrate remote packet {}: {err}",
+                            packet.sequence
+                        );
+                        continue;
+                    }
+                },
+                Err(err) => {
+                    log::error!(
+                        "[commands] command pipeline mutex poisoned while integrating remote packet: {err}"
+                    );
+                    break;
+                }
+            };
+
+            if applied_entries.is_empty() {
+                continue;
+            }
+
+            self.apply_remote_entries(&applied_entries);
+        }
+    }
+
+    #[cfg_attr(not(any(feature = "network-quic", test)), allow(dead_code))]
+    fn apply_remote_entries(&mut self, entries: &[CommandEntry]) {
+        if entries.is_empty() {
+            return;
+        }
+
+        let Some(editor_entity) = self.command_entity else {
+            log::warn!("[commands] editor entity unavailable; skipping remote command apply");
+            return;
+        };
+
+        let world = self.scheduler.world_mut();
+        for entry in entries {
+            match entry.payload.command_type.as_str() {
+                CMD_SELECTION_HIGHLIGHT => {
+                    if !matches!(entry.payload.scope, CommandScope::Entity(_)) {
+                        log::warn!(
+                            "[commands] selection highlight command missing entity scope (id {:?})",
+                            entry.id
+                        );
+                        continue;
+                    }
+
+                    match serde_json::from_slice::<SelectionHighlightCommand>(&entry.payload.data) {
+                        Ok(command) => {
+                            let target_entity = crate::ecs::Entity::from(command.entity);
+                            let exists = world.contains(target_entity);
+
+                            match world.get_mut::<EditorSelection>(editor_entity) {
+                                Some(selection) => {
+                                    if exists {
+                                        selection.primary = Some(target_entity);
+                                    } else {
+                                        log::warn!(
+                                            "[commands] remote highlight target {:?} missing locally",
+                                            command.entity
+                                        );
+                                    }
+                                    selection.highlight_active = command.active;
+                                    selection.frames_since_change = 0;
+                                }
+                                None => {
+                                    log::warn!(
+                                        "[commands] editor selection component missing on {:?}",
+                                        editor_entity
+                                    );
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[commands] failed to decode SelectionHighlightCommand payload: {err}"
+                            );
+                        }
+                    }
+                }
+                other => {
+                    log::debug!(
+                        "[commands] ignoring unhandled remote command type {}",
+                        other
+                    );
+                }
+            }
+        }
+    }
 }
 
 crate::register_component_types!(
@@ -736,3 +862,54 @@ crate::register_component_types!(
     CommandOutbox,
     CommandTransportQueue
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::command_log::{
+        AuthorId, CommandAuthor, CommandEntry, CommandId, CommandPayload, CommandRole,
+        CommandScope, ConflictStrategy,
+    };
+
+    #[test]
+    fn apply_remote_selection_highlight_updates_world() {
+        let mut engine = Engine::new();
+
+        let (editor_entity, primary_entity) = {
+            let world = engine.world();
+            let mut entries = world.component_entries::<EditorSelection>();
+            assert_eq!(entries.len(), 1);
+            let (entity, selection) = entries.remove(0);
+            (
+                entity,
+                selection.primary.expect("selection should have primary"),
+            )
+        };
+
+        let handle = EntityHandle::from(primary_entity);
+        let command = SelectionHighlightCommand::new(handle, false);
+        let payload = serde_json::to_vec(&command).expect("serialize selection command");
+        let entry = CommandEntry::new(
+            CommandId::new(5, AuthorId(3)),
+            123,
+            CommandPayload::new(
+                CMD_SELECTION_HIGHLIGHT,
+                CommandScope::Entity(handle),
+                payload,
+            ),
+            ConflictStrategy::LastWriteWins,
+            CommandAuthor::new(AuthorId(3), CommandRole::Editor),
+            None,
+        );
+
+        engine.apply_remote_entries(&[entry]);
+
+        let world = engine.world();
+        let selection = world
+            .get::<EditorSelection>(editor_entity)
+            .expect("editor selection present");
+        assert_eq!(selection.primary, Some(primary_entity));
+        assert!(!selection.highlight_active);
+        assert_eq!(selection.frames_since_change, 0);
+    }
+}

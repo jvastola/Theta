@@ -1,8 +1,8 @@
 use crate::editor::commands::{CMD_SELECTION_HIGHLIGHT, SelectionHighlightCommand};
 use crate::network::command_log::{
-    AuthorId, CommandAuthor, CommandDefinition, CommandId, CommandLog, CommandLogError,
-    CommandPacket, CommandPayload, CommandRegistry, CommandRole, CommandScope, CommandSigner,
-    ConflictStrategy, NoopCommandSigner, NoopSignatureVerifier, SignatureVerifier,
+    AuthorId, CommandAuthor, CommandDefinition, CommandEntry, CommandId, CommandLog,
+    CommandLogError, CommandPacket, CommandPayload, CommandRegistry, CommandRole, CommandScope,
+    CommandSigner, ConflictStrategy, NoopCommandSigner, NoopSignatureVerifier, SignatureVerifier,
 };
 #[cfg(feature = "network-quic")]
 use crate::network::transport::TransportSession;
@@ -78,14 +78,40 @@ impl CommandPipeline {
         self.pending_packets.drain(..).collect()
     }
 
+    #[cfg_attr(not(any(feature = "network-quic", test)), allow(dead_code))]
+    pub fn integrate_remote_packet(
+        &mut self,
+        packet: &CommandPacket,
+    ) -> Result<Vec<CommandEntry>, CommandLogError> {
+        let batch = packet
+            .decode()
+            .map_err(|err| CommandLogError::PacketDecodeFailed(err.to_string()))?;
+
+        let mut applied = Vec::new();
+        for entry in &batch.entries {
+            if self.log.integrate_remote(entry)? {
+                applied.push(entry.clone());
+            }
+        }
+
+        if let Some(latest) = self.log.latest_id() {
+            self.last_published = Some(latest);
+        }
+
+        Ok(applied)
+    }
+
+    #[allow(dead_code)]
     pub fn set_signer(&mut self, signer: Box<dyn CommandSigner>) {
         self.signer = signer;
     }
 
+    #[allow(dead_code)]
     pub fn set_signature_verifier(&mut self, verifier: Arc<dyn SignatureVerifier>) {
         self.log.set_verifier(verifier);
     }
 
+    #[allow(dead_code)]
     pub fn replace_network_session(&mut self, session: NetworkSession) {
         self.session = session;
     }
@@ -99,6 +125,7 @@ impl CommandPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::command_log::CommandBatch;
 
     #[test]
     fn pipeline_emits_batches_for_highlight() {
@@ -128,5 +155,60 @@ mod tests {
         // no extra batches when nothing new happens
         let none = pipeline.drain_packets();
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn integrates_remote_packet_and_updates_lamport() {
+        let mut pipeline = CommandPipeline::new();
+        let entity = EntityHandle {
+            index: 9,
+            generation: 0,
+        };
+
+        pipeline
+            .record_selection_highlight(entity, true)
+            .expect("append highlight");
+        let local_packets = pipeline.drain_packets();
+        assert_eq!(local_packets.len(), 1);
+
+        let remote = SelectionHighlightCommand::new(entity, false);
+        let payload = serde_json::to_vec(&remote).expect("serialize remote command");
+        let author = CommandAuthor::new(AuthorId(11), CommandRole::Editor);
+        let entry = CommandEntry::new(
+            CommandId::new(5, AuthorId(11)),
+            777,
+            CommandPayload::new(
+                CMD_SELECTION_HIGHLIGHT,
+                CommandScope::Entity(entity),
+                payload,
+            ),
+            ConflictStrategy::LastWriteWins,
+            author,
+            None,
+        );
+
+        let batch = CommandBatch {
+            sequence: 2,
+            timestamp_ms: 888,
+            entries: vec![entry.clone()],
+        };
+        let packet = CommandPacket::from_batch(&batch).expect("packet serialize");
+
+        let applied = pipeline
+            .integrate_remote_packet(&packet)
+            .expect("integrate remote");
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].id, entry.id);
+
+        assert_eq!(pipeline.last_published, pipeline.log.latest_id());
+
+        pipeline
+            .record_selection_highlight(entity, true)
+            .expect("append second");
+        let packets = pipeline.drain_packets();
+        assert_eq!(packets.len(), 1);
+        let decoded = packets[0].decode().expect("decode batch");
+        assert_eq!(decoded.entries.len(), 1);
+        assert!(decoded.entries[0].id.lamport() > entry.id.lamport());
     }
 }
