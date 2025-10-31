@@ -1,7 +1,7 @@
-use codex::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
-use codex::engine::Engine;
-use codex::engine::schedule::Stage;
-use codex::network::DiffPayload;
+use polyforge::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
+use polyforge::engine::Engine;
+use polyforge::engine::schedule::Stage;
+use polyforge::network::DiffPayload;
 
 #[test]
 fn engine_emits_change_sets_after_running() {

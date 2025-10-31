@@ -1,6 +1,6 @@
-# Codex VR Engine
+# PolyForge VR Engine
 
-Codex is a Rust-native VR-first game engine concept focused on high-performance rendering, ergonomic mesh authoring, and networked collaboration. This repository currently captures the architectural plan and initial scaffolding.
+PolyForge is a Rust-native VR-first game engine & mesh authoring platform focused on high-performance rendering, ergonomic mesh tools, and networked collaboration. This repository contains architecture, scaffolding, and tests for the engine and editor runtime.
 
 ## Current Status
 - Stage-aware scheduler executes `Startup → Simulation → Render → Editor` phases, with read-only systems fanned out via Rayon.

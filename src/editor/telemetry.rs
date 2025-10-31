@@ -1,7 +1,10 @@
 use crate::ecs::Entity;
 use crate::engine::schedule::Stage;
-use crate::network::{ChangeSet, ComponentDiff, DiffPayload, NetworkSession};
+use crate::network::{
+    ChangeSet, ComponentDescriptor, ComponentDiff, ComponentKey, DiffPayload, NetworkSession,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageSample {
@@ -98,6 +101,9 @@ impl TelemetryReplicator {
     pub fn publish(&mut self, entity: Entity, telemetry: &FrameTelemetry) {
         match serde_json::to_vec(telemetry) {
             Ok(bytes) => {
+                self.session.advertise_component(ComponentDescriptor {
+                    key: ComponentKey::of::<TelemetryComponent>(),
+                });
                 let diff = if self.initialized {
                     ComponentDiff::update::<TelemetryComponent>(entity, bytes)
                 } else {
@@ -138,6 +144,87 @@ impl TelemetryReplicator {
 }
 
 pub struct TelemetryComponent;
+
+const DEFAULT_HISTORY_CAPACITY: usize = 120;
+
+#[derive(Debug)]
+pub struct TelemetryOverlay {
+    history: VecDeque<FrameTelemetry>,
+    capacity: usize,
+}
+
+impl Default for TelemetryOverlay {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_HISTORY_CAPACITY)
+    }
+}
+
+impl TelemetryOverlay {
+    pub fn with_capacity(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            history: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub fn ingest(&mut self, telemetry: FrameTelemetry) {
+        if self.history.len() == self.capacity {
+            self.history.pop_front();
+        }
+        self.history.push_back(telemetry);
+    }
+
+    pub fn latest(&self) -> Option<&FrameTelemetry> {
+        self.history.back()
+    }
+
+    pub fn text_panel(&self) -> Option<String> {
+        let latest = self.latest()?;
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Frame {} | avg {:.2} ms",
+            latest.frame,
+            latest.average_frame_time * 1000.0
+        ));
+
+        for sample in &latest.stage_samples {
+            lines.push(format!(
+                "  {:<8} total {:>6.2} ms roll {:>6.2} ms vio {}",
+                sample.stage, sample.total_ms, sample.rolling_ms, sample.violation_count
+            ));
+        }
+
+        lines.push(format!(
+            "  Triggers  L {:.2} | R {:.2}",
+            latest.controller_trigger[0], latest.controller_trigger[1]
+        ));
+
+        Some(lines.join("\n"))
+    }
+
+    pub fn rolling_series(&self, stage: Stage) -> Vec<f32> {
+        let label = stage.label();
+        self.history
+            .iter()
+            .filter_map(|frame| {
+                frame
+                    .stage_samples
+                    .iter()
+                    .find(|sample| sample.stage == label)
+                    .map(|sample| sample.rolling_ms)
+            })
+            .collect()
+    }
+
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -259,6 +346,24 @@ mod tests {
             }
             other => panic!("expected update payload, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn telemetry_overlay_maintains_history_and_formats_text() {
+        let mut overlay = TelemetryOverlay::with_capacity(2);
+        overlay.ingest(static_sample(1));
+        overlay.ingest(static_sample(2));
+        overlay.ingest(static_sample(3));
+
+        assert_eq!(overlay.capacity(), 2);
+        assert_eq!(overlay.history_len(), 2);
+
+        let panel = overlay.text_panel().expect("panel text");
+        assert!(panel.contains("Frame 3"));
+        assert!(panel.contains("Render"));
+
+        let render_series = overlay.rolling_series(Stage::Render);
+        assert_eq!(render_series.len(), 2);
     }
 
     proptest::prop_compose! {

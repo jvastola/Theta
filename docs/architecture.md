@@ -1,7 +1,7 @@
-# Codex Engine Architectural Specification
+# PolyForge Engine Architectural Specification
 
 ## Purpose
-Define the foundational architecture for the Codex VR-first game engine and editor, detailing subsystems, responsibilities, data flow, and technical milestones required to reach a collaborative VR mesh-authoring experience.
+Define the foundational architecture for the PolyForge VR-first game engine and editor, detailing subsystems, responsibilities, data flow, and technical milestones required to reach a collaborative VR mesh-authoring experience.
 
 ## Guiding Principles
 - **VR-native:** All runtime and editor loops assume stereo rendering and tracked input as first-class signals.

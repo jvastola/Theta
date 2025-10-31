@@ -1,6 +1,6 @@
-# Codex System Architecture Diagrams
+# PolyForge System Architecture Diagrams
 
-This document captures high-level UML-style views of the Codex engine. Diagrams are authored in [Mermaid](https://mermaid.js.org/) so they can be rendered directly in supporting tooling.
+This document captures high-level UML-style views of the PolyForge engine. Diagrams are authored in [Mermaid](https://mermaid.js.org/) so they can be rendered directly in supporting tooling.
 
 ## Module Overview
 

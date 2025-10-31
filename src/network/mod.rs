@@ -45,6 +45,11 @@ impl ComponentKey {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ComponentDescriptor {
+    pub key: ComponentKey,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DiffPayload {
     Insert { bytes: Vec<u8> },
@@ -90,14 +95,21 @@ pub struct ChangeSet {
     pub sequence: u64,
     pub timestamp_ms: u64,
     pub diffs: Vec<ComponentDiff>,
+    pub descriptors: Vec<ComponentDescriptor>,
 }
 
 impl ChangeSet {
-    pub fn new(sequence: u64, timestamp_ms: u64, diffs: Vec<ComponentDiff>) -> Self {
+    pub fn new(
+        sequence: u64,
+        timestamp_ms: u64,
+        diffs: Vec<ComponentDiff>,
+        descriptors: Vec<ComponentDescriptor>,
+    ) -> Self {
         Self {
             sequence,
             timestamp_ms,
             diffs,
+            descriptors,
         }
     }
 
@@ -108,11 +120,15 @@ impl ChangeSet {
 
 pub struct NetworkSession {
     sequence: u64,
+    advertised_components: Vec<ComponentDescriptor>,
 }
 
 impl NetworkSession {
     pub fn new() -> Self {
-        Self { sequence: 0 }
+        Self {
+            sequence: 0,
+            advertised_components: Vec::new(),
+        }
     }
 
     pub fn connect() -> Self {
@@ -124,10 +140,17 @@ impl NetworkSession {
         self.sequence
     }
 
+    pub fn advertise_component(&mut self, descriptor: ComponentDescriptor) {
+        if !self.advertised_components.contains(&descriptor) {
+            self.advertised_components.push(descriptor);
+        }
+    }
+
     pub fn craft_change_set(&mut self, diffs: Vec<ComponentDiff>) -> ChangeSet {
         let sequence = self.next_sequence();
         let timestamp_ms = current_time_millis();
-        ChangeSet::new(sequence, timestamp_ms, diffs)
+        let descriptors = std::mem::take(&mut self.advertised_components);
+        ChangeSet::new(sequence, timestamp_ms, diffs, descriptors)
     }
 }
 
@@ -163,9 +186,13 @@ mod tests {
         let mut session = NetworkSession::new();
         let entity = Entity::new(1, 0);
         let diff = ComponentDiff::insert::<Position>(entity, vec![1, 2, 3]);
+        session.advertise_component(ComponentDescriptor {
+            key: ComponentKey::of::<Position>(),
+        });
         let change_set = session.craft_change_set(vec![diff]);
 
         let output = serde_json::to_string(&change_set).expect("serialization should succeed");
         assert!(output.contains("sequence"));
+        assert!(output.contains("descriptors"));
     }
 }
