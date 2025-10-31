@@ -69,6 +69,12 @@ Introduce an authoritative, signed command log that merges concurrent editor act
 - Integration: 🔄 Command pipeline emits selection highlight commands, persists them in the `CommandOutbox`, and now feeds a `CommandTransportQueue` that surfaces serialized `CommandPacket` payloads ready for transmission. Integration tests cover both outbox and transport queue wiring.
 - Reliability: 🔄 Batch replay helpers (`CommandLog::integrate_batch` / `CommandPacket`) and a property-based fuzz harness validate deterministic convergence; telemetry metrics remain pending.
 
+## Next Actions
+- Wire `CommandTransportQueue` into QUIC/WebRTC transports so `CommandPacket`s broadcast to remote peers and replay on receipt.
+- Instrument command metrics (append rate, conflict rejections, queue backlog) and surface them via telemetry/diagnostics.
+- Expand editor command coverage (e.g., gizmo transforms) and add signature enforcement paths once transport hooks land.
+- Schedule fuzz harness in CI (nightly) and capture minimal repro artifacts for failed seeds.
+
 ## Follow-Up (Phase 4.1+)
 - Integrate command log snapshots with ECS snapshots for rapid rewinds.
 - Add CRDT-based merge strategies tailored for PolySketch mesh operations.

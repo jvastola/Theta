@@ -201,7 +201,7 @@ pub trait SignatureVerifier: Send + Sync {
     ) -> bool;
 }
 
-pub trait CommandSigner {
+pub trait CommandSigner: Send + Sync {
     fn author(&self) -> &CommandAuthor;
     fn sign(&self, lamport: u64, payload: &CommandPayload) -> Option<CommandSignature>;
 }
@@ -297,6 +297,10 @@ impl CommandLog {
         }
     }
 
+    pub fn set_verifier(&mut self, verifier: Arc<dyn SignatureVerifier>) {
+        self.verifier = verifier;
+    }
+
     pub fn lamport(&self) -> u64 {
         self.lamport_clock
     }
@@ -306,9 +310,9 @@ impl CommandLog {
         self.lamport_clock
     }
 
-    pub fn append_local<S: CommandSigner>(
+    pub fn append_local(
         &mut self,
-        signer: &S,
+        signer: &dyn CommandSigner,
         mut payload: CommandPayload,
         strategy: Option<ConflictStrategy>,
     ) -> Result<CommandId, CommandLogError> {

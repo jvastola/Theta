@@ -1,8 +1,8 @@
 use crate::editor::commands::{CMD_SELECTION_HIGHLIGHT, SelectionHighlightCommand};
 use crate::network::command_log::{
-    AuthorId, CommandAuthor, CommandBatch, CommandDefinition, CommandId, CommandLog,
-    CommandLogError, CommandPayload, CommandRegistry, CommandRole, CommandScope, ConflictStrategy,
-    NoopCommandSigner, NoopSignatureVerifier, SignatureVerifier,
+    AuthorId, CommandAuthor, CommandDefinition, CommandId, CommandLog, CommandLogError,
+    CommandPacket, CommandPayload, CommandRegistry, CommandRole, CommandScope, CommandSigner,
+    ConflictStrategy, NoopCommandSigner, NoopSignatureVerifier, SignatureVerifier,
 };
 use crate::network::{EntityHandle, NetworkSession};
 use serde_json::to_vec;
@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 pub struct CommandPipeline {
     log: CommandLog,
-    signer: NoopCommandSigner,
+    signer: Box<dyn CommandSigner>,
     session: NetworkSession,
     last_published: Option<CommandId>,
-    pending_batches: Vec<CommandBatch>,
+    pending_packets: Vec<CommandPacket>,
 }
 
 impl CommandPipeline {
@@ -31,14 +31,14 @@ impl CommandPipeline {
         let verifier = Arc::new(NoopSignatureVerifier::default()) as Arc<dyn SignatureVerifier>;
         let log = CommandLog::new(Arc::clone(&registry), verifier);
         let author = CommandAuthor::new(AuthorId(0), CommandRole::Editor);
-        let signer = NoopCommandSigner::new(author);
+        let signer: Box<dyn CommandSigner> = Box::new(NoopCommandSigner::new(author));
 
         Self {
             log,
             signer,
             session: NetworkSession::connect(),
             last_published: None,
-            pending_batches: Vec::new(),
+            pending_packets: Vec::new(),
         }
     }
 
@@ -47,12 +47,15 @@ impl CommandPipeline {
         payload: CommandPayload,
         strategy: Option<ConflictStrategy>,
     ) -> Result<(), CommandLogError> {
-        self.log.append_local(&self.signer, payload, strategy)?;
+        self.log
+            .append_local(self.signer.as_ref(), payload, strategy)?;
         let new_entries = self.log.entries_since(self.last_published.as_ref());
         if !new_entries.is_empty() {
             self.last_published = self.log.latest_id();
             let batch = self.session.craft_command_batch(new_entries);
-            self.pending_batches.push(batch);
+            let packet = CommandPacket::from_batch(&batch)
+                .expect("serialize command batch for transport");
+            self.pending_packets.push(packet);
         }
         Ok(())
     }
@@ -69,8 +72,20 @@ impl CommandPipeline {
         self.append_payload(payload, Some(ConflictStrategy::LastWriteWins))
     }
 
-    pub fn drain_batches(&mut self) -> Vec<CommandBatch> {
-        self.pending_batches.drain(..).collect()
+    pub fn drain_packets(&mut self) -> Vec<CommandPacket> {
+        self.pending_packets.drain(..).collect()
+    }
+
+    pub fn set_signer(&mut self, signer: Box<dyn CommandSigner>) {
+        self.signer = signer;
+    }
+
+    pub fn set_signature_verifier(&mut self, verifier: Arc<dyn SignatureVerifier>) {
+        self.log.set_verifier(verifier);
+    }
+
+    pub fn replace_network_session(&mut self, session: NetworkSession) {
+        self.session = session;
     }
 }
 
@@ -90,9 +105,11 @@ mod tests {
             .record_selection_highlight(entity, true)
             .expect("append highlight");
 
-        let batches = pipeline.drain_batches();
-        assert_eq!(batches.len(), 1);
-        let batch = &batches[0];
+        let packets = pipeline.drain_packets();
+        assert_eq!(packets.len(), 1);
+        let batch = packets[0]
+            .decode()
+            .expect("decode command packet payload");
         assert_eq!(batch.entries.len(), 1);
         let entry = &batch.entries[0];
         assert_eq!(entry.payload.command_type, CMD_SELECTION_HIGHLIGHT);
@@ -104,7 +121,7 @@ mod tests {
         assert!(decoded.active);
 
         // no extra batches when nothing new happens
-        let none = pipeline.drain_batches();
+        let none = pipeline.drain_packets();
         assert!(none.is_empty());
     }
 }

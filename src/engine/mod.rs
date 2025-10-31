@@ -5,6 +5,7 @@ use self::commands::CommandPipeline;
 use crate::ecs::World;
 use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
 use crate::editor::{CommandOutbox, CommandTransportQueue};
+use crate::network::command_log::{CommandBatch, CommandPacket};
 use crate::network::EntityHandle;
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
 #[cfg(feature = "vr-openxr")]
@@ -574,9 +575,22 @@ impl Engine {
         }
 
         if let Ok(mut pipeline) = self.command_pipeline.lock() {
-            let drained = pipeline.drain_batches();
-            if !drained.is_empty() {
-                for batch in &drained {
+            let packets = pipeline.drain_packets();
+            if !packets.is_empty() {
+                let mut decoded_batches: Vec<CommandBatch> = Vec::with_capacity(packets.len());
+                for packet in &packets {
+                    match packet.decode() {
+                        Ok(batch) => decoded_batches.push(batch),
+                        Err(err) => {
+                            log::error!(
+                                "[commands] failed to decode command packet seq {}: {err}",
+                                packet.sequence
+                            );
+                        }
+                    }
+                }
+
+                for batch in &decoded_batches {
                     println!(
                         "[commands] batch {} entries {}",
                         batch.sequence,
@@ -585,25 +599,38 @@ impl Engine {
                 }
 
                 if let Some(entity) = self.command_entity {
-                    let packets = {
-                        let world = self.scheduler.world_mut();
-                        if let Some(outbox) = world.get_mut::<CommandOutbox>(entity) {
-                            outbox.ingest(drained);
-                            outbox.drain_packets()
-                        } else {
-                            Vec::new()
-                        }
-                    };
+                    let mut packets_to_queue: Vec<CommandPacket> = Vec::new();
 
-                    if !packets.is_empty() {
+                    if !decoded_batches.is_empty() {
+                        let mut outbox_packets = None;
                         {
                             let world = self.scheduler.world_mut();
-                            if let Some(queue) = world.get_mut::<CommandTransportQueue>(entity) {
-                                queue.enqueue(packets.iter().cloned());
+                            if let Some(outbox) = world.get_mut::<CommandOutbox>(entity) {
+                                outbox.ingest(decoded_batches.clone());
+                                outbox_packets = Some(outbox.drain_packets());
                             }
                         }
 
-                        for packet in &packets {
+                        if let Some(mut drained) = outbox_packets {
+                            if !drained.is_empty() {
+                                packets_to_queue.append(&mut drained);
+                            }
+                        }
+                    }
+
+                    if packets_to_queue.is_empty() {
+                        packets_to_queue = packets.clone();
+                    }
+
+                    if !packets_to_queue.is_empty() {
+                        {
+                            let world = self.scheduler.world_mut();
+                            if let Some(queue) = world.get_mut::<CommandTransportQueue>(entity) {
+                                queue.enqueue(packets_to_queue.iter().cloned());
+                            }
+                        }
+
+                        for packet in &packets_to_queue {
                             log::info!(
                                 "[commands] transport queued seq {} ({} bytes)",
                                 packet.sequence,

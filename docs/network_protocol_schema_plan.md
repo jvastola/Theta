@@ -125,16 +125,18 @@
    **Status (Oct 31, 2025):** 🔄 In Progress. Command log core (`network::command_log`) implemented with Lamport ordering, conflict strategies (LastWriteWins/Merge/Reject), role-based permissions, and Ed25519 signature hooks (behind `network-quic` feature). Engine integration (`engine::commands::CommandPipeline`) emits selection highlight commands through the log; the `editor::CommandOutbox` persists batches and feeds a `CommandTransportQueue` that serializes them into `CommandPacket` payloads for transport. Replay helpers (`CommandLog::integrate_batch`/`integrate_packet`) and a property-based fuzz harness ensure deterministic convergence. Remaining: telemetry metrics and transport wiring to real sockets. Phase plan in `docs/phase4_plan.md`.
 
 5. **Phase 5 - Editor Collaboration & Assets (Week 10-11)**
-   - Extend schema with `EditorEvent` messages for tool activations, selection highlights, and gizmo transforms.
+   - Wire `CommandTransportQueue` into live transports (QUIC/WebRTC) and deliver serialized `CommandPacket` payloads to connected peers.
+   - Extend schema with `EditorEvent` messages for tool activations, selection highlights, and gizmo transforms; reuse command log permissions for gating.
    - Implement `AssetTransfer` chunked streaming with SHA-256 checksums and resume tokens.
-   - Integrate telemetry reporting (`TelemetryReport` messages) into in-editor dashboards.
-   - Build interoperability harness testing native QUIC vs WebRTC data channel peers.
+   - Integrate telemetry reporting (`TelemetryReport` messages) into in-editor dashboards with command throughput/latency charts.
+   - Build interoperability harness testing native QUIC vs WebRTC data channel peers (including cross-transport command replay).
 
 6. **Phase 6 - Production Hardening (Week 12+)**
-   - Add WebRTC fallback transport with DTLS and unordered/partial reliability channels.
-   - Implement session control messages (`SessionControl`) for role changes, kick/ban, host migration.
+   - Add WebRTC fallback transport with DTLS and unordered/partial reliability channels, reusing the Phase 5 command transport bridge.
+   - Implement session control messages (`SessionControl`) for role changes, kick/ban, host migration, and integrate command-log-based audit history.
+   - Extend telemetry metrics to include command append rate, conflict resolution counts, and queue backlog for proactive alerting.
    - Document schema evolution workflow and establish automated migration scripts.
-   - Run soak tests with 8-peer sessions at 90 Hz replication cadence on Quest 3 hardware.
+   - Run soak tests with 8-peer sessions at 90 Hz replication cadence on Quest 3 hardware, validating command replay/reconnect resilience.
 
 ## Resolved Design Decisions
 
