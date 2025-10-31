@@ -1,7 +1,10 @@
+mod commands;
 pub mod schedule;
 
+use self::commands::CommandPipeline;
 use crate::ecs::World;
 use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
+use crate::network::EntityHandle;
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
 #[cfg(feature = "vr-openxr")]
 use crate::vr::openxr::OpenXrInputProvider;
@@ -23,6 +26,7 @@ pub struct Engine {
     frame_stats_entity: Option<crate::ecs::Entity>,
     telemetry_entity: Option<crate::ecs::Entity>,
     input_provider: Arc<Mutex<Box<dyn VrInputProvider>>>,
+    command_pipeline: Arc<Mutex<CommandPipeline>>,
 }
 
 impl Engine {
@@ -38,6 +42,7 @@ impl Engine {
         let scheduler = Scheduler::default();
         let renderer = Self::build_renderer(config);
         let input_provider = build_input_provider();
+        let command_pipeline = Arc::new(Mutex::new(CommandPipeline::new()));
 
         let mut engine = Self {
             scheduler,
@@ -47,6 +52,7 @@ impl Engine {
             frame_stats_entity: None,
             telemetry_entity: None,
             input_provider,
+            command_pipeline,
         };
 
         engine.register_core_systems();
@@ -256,12 +262,24 @@ impl Engine {
             }
         });
 
+        let pipeline_handle = Arc::clone(&self.command_pipeline);
         self.add_system_fn(Stage::Editor, "cycle_selection", move |world, _delta| {
             if let Some(selection) = world.get_mut::<EditorSelection>(editor_entity) {
                 selection.frames_since_change += 1;
                 if selection.frames_since_change >= selection.highlight_interval {
                     selection.frames_since_change = 0;
                     selection.highlight_active = !selection.highlight_active;
+
+                    if let Some(primary) = selection.primary {
+                        let handle = EntityHandle::from(primary);
+                        if let Ok(mut pipeline) = pipeline_handle.lock() {
+                            if let Err(err) = pipeline
+                                .record_selection_highlight(handle, selection.highlight_active)
+                            {
+                                eprintln!("[commands] failed to record highlight command: {err}");
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -537,6 +555,16 @@ impl Engine {
                 if let Some(replicator) = world.get_mut::<TelemetryReplicator>(entity) {
                     replicator.publish(entity, &latest);
                 }
+            }
+        }
+
+        if let Ok(mut pipeline) = self.command_pipeline.lock() {
+            for batch in pipeline.drain_batches() {
+                println!(
+                    "[commands] batch {} entries {}",
+                    batch.sequence,
+                    batch.entries.len()
+                );
             }
         }
     }

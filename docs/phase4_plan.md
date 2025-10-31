@@ -64,6 +64,11 @@ Introduce an authoritative, signed command log that merges concurrent editor act
 - Documentation (`network_protocol_schema_plan.md`, `phase4_plan.md`) updated with status and schema references.
 - Fuzz harness executes in CI via `cargo test --features network-quic --test command_log_fuzz` (placeholder).
 
+## Status (Oct 31, 2025)
+- Foundation: ✅ Command log core with Lamport ordering, role enforcement, and Ed25519 hooks.
+- Integration: 🔄 Engine command pipeline emits selection highlight commands and produces network batches for broadcasting.
+- Reliability: ⬜ Fuzz harness, replay helpers, and telemetry metrics remain pending.
+
 ## Follow-Up (Phase 4.1+)
 - Integrate command log snapshots with ECS snapshots for rapid rewinds.
 - Add CRDT-based merge strategies tailored for PolySketch mesh operations.

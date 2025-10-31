@@ -41,6 +41,7 @@ pub mod wire {
 }
 
 use crate::ecs::Entity;
+use crate::network::command_log::{CommandBatch, CommandEntry};
 use serde::{Deserialize, Serialize};
 use std::any::TypeId;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -226,6 +227,14 @@ impl NetworkSession {
         let descriptors = std::mem::take(&mut self.advertised_components);
         ChangeSet::new(sequence, timestamp_ms, diffs, descriptors)
     }
+
+    pub fn craft_command_batch(&mut self, entries: Vec<CommandEntry>) -> CommandBatch {
+        CommandBatch {
+            sequence: self.next_sequence(),
+            timestamp_ms: current_time_millis(),
+            entries,
+        }
+    }
 }
 
 pub(crate) fn current_time_millis() -> u64 {
@@ -238,6 +247,10 @@ pub(crate) fn current_time_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::command_log::{
+        AuthorId, CommandAuthor, CommandEntry, CommandId, CommandPayload, CommandRole,
+        CommandScope, ConflictStrategy,
+    };
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct Position(f32, f32, f32);
@@ -370,5 +383,28 @@ mod tests {
 
         assert_eq!(first.sequence + 1, second.sequence);
         assert!(first.timestamp_ms <= second.timestamp_ms);
+    }
+
+    #[test]
+    fn command_batch_sequences_increment() {
+        let mut session = NetworkSession::new();
+        let author = CommandAuthor::new(AuthorId(5), CommandRole::Editor);
+        let entry = CommandEntry::new(
+            CommandId::new(1, AuthorId(5)),
+            99,
+            CommandPayload::new("editor.test", CommandScope::Global, vec![9]),
+            ConflictStrategy::Merge,
+            author.clone(),
+            None,
+        );
+
+        let first = session.craft_command_batch(vec![entry.clone()]);
+        assert_eq!(first.sequence, 1);
+        assert_eq!(first.entries.len(), 1);
+        assert!(first.timestamp_ms <= current_time_millis());
+
+        let second = session.craft_command_batch(vec![entry]);
+        assert_eq!(second.sequence, 2);
+        assert_eq!(second.entries.len(), 1);
     }
 }

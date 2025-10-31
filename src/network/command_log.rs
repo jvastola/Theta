@@ -62,7 +62,7 @@ impl Default for ConflictStrategy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandPayload {
     pub command_type: String,
     pub scope: CommandScope,
@@ -79,7 +79,7 @@ impl CommandPayload {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandDefinition {
     required_role: CommandRole,
     default_strategy: ConflictStrategy,
@@ -146,10 +146,10 @@ impl CommandDefinitionBuilder {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct AuthorId(pub u64);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthorPublicKey(pub Vec<u8>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandAuthor {
     pub id: AuthorId,
     pub role: CommandRole,
@@ -205,7 +205,7 @@ pub trait CommandSigner {
     fn sign(&self, lamport: u64, payload: &CommandPayload) -> Option<CommandSignature>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandEntry {
     pub id: CommandId,
     pub timestamp_ms: u64,
@@ -433,6 +433,32 @@ impl CommandLog {
     pub fn entries(&self) -> impl Iterator<Item = &CommandEntry> {
         self.entries.values()
     }
+
+    pub fn entry(&self, id: &CommandId) -> Option<&CommandEntry> {
+        self.entries.get(id)
+    }
+
+    pub fn entries_since(&self, last: Option<&CommandId>) -> Vec<CommandEntry> {
+        let mut results = Vec::new();
+        for (id, entry) in &self.entries {
+            if last.map_or(false, |prev| id <= prev) {
+                continue;
+            }
+            results.push(entry.clone());
+        }
+        results
+    }
+
+    pub fn latest_id(&self) -> Option<CommandId> {
+        self.entries.keys().next_back().cloned()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandBatch {
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    pub entries: Vec<CommandEntry>,
 }
 
 #[derive(Default)]
@@ -604,6 +630,35 @@ mod tests {
         fn sign(&self, _lamport: u64, _payload: &CommandPayload) -> Option<CommandSignature> {
             Some(CommandSignature(vec![0u8; 64]))
         }
+    }
+
+    #[test]
+    fn entries_since_tracks_latest_id() {
+        let registry = setup_registry();
+        let verifier = Arc::new(NoopSignatureVerifier::default()) as Arc<dyn SignatureVerifier>;
+        let mut log = CommandLog::new(registry.clone(), verifier);
+
+        let editor = CommandAuthor::new(AuthorId(9), CommandRole::Editor);
+        let signer = FakeSignatureSigner::new(editor);
+
+        let first_payload = CommandPayload::new("editor.create", CommandScope::Global, vec![0]);
+        let first_id = log
+            .append_local(&signer, first_payload, Some(ConflictStrategy::Merge))
+            .expect("append first");
+
+        let initial = log.entries_since(None);
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].id, first_id);
+
+        let second_payload = CommandPayload::new("editor.create", CommandScope::Global, vec![1]);
+        let second_id = log
+            .append_local(&signer, second_payload, Some(ConflictStrategy::Merge))
+            .expect("append second");
+
+        let delta = log.entries_since(Some(&first_id));
+        assert_eq!(delta.len(), 1);
+        assert_eq!(delta[0].id, second_id);
+        assert_eq!(log.latest_id(), Some(second_id));
     }
 
     #[test]
