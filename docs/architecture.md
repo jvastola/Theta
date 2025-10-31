@@ -34,7 +34,7 @@ Define the foundational architecture for the Codex VR-first game engine and edit
 - Systems can be registered as structs or closure-based adapters, enabling game/editor layers to plug in at runtime.
 - Stage-aware execution (`Startup → Simulation → Render → Editor`) batches exclusive systems per stage, while read-only jobs fan out in parallel using Rayon.
 - Per-stage profiling captures sequential/parallel timings, records slow system warnings, and flags read-only policy violations so tooling can react in-editor.
-- Core telemetry (e.g., frame counters, stage durations, controller state) lives in ECS so runtime/editor layers and network replication can observe it uniformly.
+- Core telemetry (e.g., frame counters, rolling stage averages, violation tallies, controller state) lives in ECS so runtime/editor layers and network replication can observe it uniformly, and the first replicated packet performs an insert handshake before emitting incremental updates.
 
 ## ECS Design
 - **Entities:** Dense integer handles backed by generational indices to avoid ABA issues.
@@ -71,6 +71,8 @@ Define the foundational architecture for the Codex VR-first game engine and edit
 - **Transport:** QUIC (native) with WebRTC fallback. Reliability layers for ECS delta compression.
 - **Synchronization:**
   - State replication via component change sets keyed by entity revision.
+  - Component keys derive from canonical Rust type names hashed deterministically, keeping identifiers stable across builds and platforms.
+  - Schema descriptor stream accompanies change sets so peers can reconcile hashed identifiers with human-readable component metadata.
   - Input prediction for latency-sensitive gestures.
   - Conflict resolution driven by CRDT-inspired command logs merged deterministically.
 - **Session Management:** Lobby discovery, host migration, and user permissions for editing operations.

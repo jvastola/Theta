@@ -81,6 +81,7 @@ impl TelemetrySurface {
 pub struct TelemetryReplicator {
     session: NetworkSession,
     last_change_set: Option<ChangeSet>,
+    initialized: bool,
 }
 
 impl Default for TelemetryReplicator {
@@ -88,6 +89,7 @@ impl Default for TelemetryReplicator {
         Self {
             session: NetworkSession::connect(),
             last_change_set: None,
+            initialized: false,
         }
     }
 }
@@ -96,7 +98,11 @@ impl TelemetryReplicator {
     pub fn publish(&mut self, entity: Entity, telemetry: &FrameTelemetry) {
         match serde_json::to_vec(telemetry) {
             Ok(bytes) => {
-                let diff = ComponentDiff::update::<TelemetryComponent>(entity, bytes);
+                let diff = if self.initialized {
+                    ComponentDiff::update::<TelemetryComponent>(entity, bytes)
+                } else {
+                    ComponentDiff::insert::<TelemetryComponent>(entity, bytes)
+                };
                 let change_set = self.session.craft_change_set(vec![diff]);
                 let payload_size = change_set
                     .diffs
@@ -115,6 +121,7 @@ impl TelemetryReplicator {
                 );
 
                 self.last_change_set = Some(change_set);
+                self.initialized = true;
             }
             Err(err) => {
                 eprintln!(
@@ -224,7 +231,7 @@ mod tests {
         assert_eq!(diff.entity.generation, entity.generation());
 
         match &diff.payload {
-            DiffPayload::Update { bytes } => {
+            DiffPayload::Insert { bytes } => {
                 let round_trip: FrameTelemetry =
                     serde_json::from_slice(bytes).expect("telemetry should deserialize");
                 assert_eq!(round_trip.frame, telemetry.frame);
@@ -234,7 +241,7 @@ mod tests {
                     telemetry.stage_samples[3].violation_count
                 );
             }
-            _ => panic!("replicator should emit update payloads"),
+            other => panic!("expected insert payload, got {:?}", other),
         }
 
         let follow_up = static_sample(6);
@@ -243,6 +250,15 @@ mod tests {
             .last_change_set()
             .expect("replicator should store newest change set");
         assert_eq!(next_change.sequence, 2);
+
+        match &next_change.diffs[0].payload {
+            DiffPayload::Update { bytes } => {
+                let round_trip: FrameTelemetry =
+                    serde_json::from_slice(bytes).expect("telemetry should deserialize");
+                assert_eq!(round_trip.frame, follow_up.frame);
+            }
+            other => panic!("expected update payload, got {:?}", other),
+        }
     }
 
     proptest::prop_compose! {
@@ -329,8 +345,8 @@ mod tests {
                     let diff = &change.diffs[0];
                     assert_eq!(diff.entity.index, entities[index].index());
                     assert_eq!(diff.entity.generation, entities[index].generation());
-                    match &diff.payload {
-                        DiffPayload::Update { bytes } => {
+                    match (&diff.payload, sequence_idx == 0) {
+                        (DiffPayload::Insert { bytes }, true) | (DiffPayload::Update { bytes }, false) => {
                             let restored: FrameTelemetry = serde_json::from_slice(bytes)
                                 .expect("telemetry payload should deserialize");
                             assert_eq!(restored.stage_samples.len(), Stage::count());
@@ -347,7 +363,12 @@ mod tests {
                                 );
                             }
                         }
-                        other => panic!("expected update payload, got {:?}", other),
+                        (payload, is_first) => panic!(
+                            "unexpected payload {:?} at position {} (is_first={})",
+                            payload,
+                            sequence_idx,
+                            is_first
+                        ),
                     }
                 }
             }

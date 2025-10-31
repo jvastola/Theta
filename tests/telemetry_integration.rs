@@ -24,6 +24,9 @@ fn engine_emits_change_sets_after_running() {
         latest.stage_samples[0].stage.as_str(),
         Stage::Startup.label()
     );
+    let render_sample = &latest.stage_samples[Stage::Render.index()];
+    assert!(!render_sample.read_only_violation);
+    assert_eq!(render_sample.violation_count, 0);
 
     let replicator = world
         .get::<TelemetryReplicator>(telemetry_entity)
@@ -49,6 +52,9 @@ fn engine_emits_change_sets_after_running() {
                     .iter()
                     .all(|sample| sample.rolling_ms.is_finite())
             );
+            let decoded_render = &decoded.stage_samples[Stage::Render.index()];
+            assert!(!decoded_render.read_only_violation);
+            assert_eq!(decoded_render.violation_count, 0);
         }
         other => panic!("expected update payload, got {:?}", other),
     }

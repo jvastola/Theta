@@ -37,10 +37,10 @@ impl ComponentKey {
         Self::from_type_id(TypeId::of::<T>(), std::any::type_name::<T>())
     }
 
-    pub fn from_type_id(type_id: TypeId, type_name: &'static str) -> Self {
+    pub fn from_type_id(_type_id: TypeId, type_name: &'static str) -> Self {
         Self {
             type_name: type_name.to_string(),
-            type_hash: hash_type_id(type_id),
+            type_hash: hash_type_name(type_name),
         }
     }
 }
@@ -131,9 +131,9 @@ impl NetworkSession {
     }
 }
 
-fn hash_type_id(type_id: TypeId) -> u64 {
+fn hash_type_name(type_name: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
-    type_id.hash(&mut hasher);
+    type_name.hash(&mut hasher);
     hasher.finish()
 }
 

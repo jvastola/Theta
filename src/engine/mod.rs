@@ -201,7 +201,7 @@ impl Engine {
             },
         );
 
-        self.add_system_fn(Stage::Render, "frame_stats", move |world, delta| {
+        self.add_system_fn(Stage::Editor, "frame_stats", move |world, delta| {
             let actor_position = world
                 .get::<Transform>(actor_entity)
                 .map(|transform| transform.position);
