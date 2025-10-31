@@ -26,10 +26,10 @@
 
 ## Message Catalog
 1. **SessionHello / SessionAcknowledge**
-   - Fields: protocol_version, schema_hash, client_nonce, requested_capabilities, auth_token (optional).
-   - Response includes server_nonce, session_id, assigned_role, capability_mask.
+   - Fields: protocol_version, schema_hash, client_nonce, requested_capabilities, auth_token (optional), client_public_key (Ed25519).
+   - Response includes server_nonce, session_id, assigned_role, capability_mask, server_public_key (Ed25519).
 2. **Heartbeat**
-   - Ping/pong with monotonic timestamps, frame counters, optional jitter buffer metrics.
+   - Ping/pong with monotonic timestamps, reported RTT, and jitter metrics for diagnostics.
 3. **WorldSnapshot**
    - Sent on join or major topology change; contains entity roster, component archetype table, initial component payloads.
    - Chunked with streaming flag and chunk sequence for large worlds.
@@ -105,6 +105,8 @@
    - Build `SessionHello`/`SessionAcknowledge` handshake with Ed25519 key exchange and capability negotiation.
    - Add heartbeat mechanism with latency probes and jitter buffer metrics.
    - Integrate transport diagnostics into telemetry layer (packet rate, compression ratios).
+
+   **Status (Oct 31, 2025):** QUIC transport prototype available under `network-quic` feature with dedicated control/replication/asset streams. Handshake exchanges Ed25519 public keys, validates protocol/schema hash, and negotiates capabilities. Heartbeat tasks update RTT/jitter metrics, now surfaced through telemetry overlay.
 
 3. **Phase 3 - ECS Replication Pipeline (Week 5-7)**
    - Implement `WorldSnapshot` chunked encoding/decoding with streaming support.

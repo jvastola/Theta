@@ -29,11 +29,12 @@ static REGISTRY: Lazy<Mutex<Vec<ComponentManifestEntry>>> = Lazy::new(|| Mutex::
 
 /// Registers a component manifest entry. Duplicate registrations are ignored.
 pub fn register_entry(entry: ComponentManifestEntry) {
-    let mut guard = REGISTRY
-        .lock()
-        .expect("component registry mutex poisoned");
+    let mut guard = REGISTRY.lock().expect("component registry mutex poisoned");
 
-    if guard.iter().any(|existing| existing.type_name == entry.type_name) {
+    if guard
+        .iter()
+        .any(|existing| existing.type_name == entry.type_name)
+    {
         return;
     }
 
@@ -42,9 +43,7 @@ pub fn register_entry(entry: ComponentManifestEntry) {
 
 /// Returns a sorted snapshot of registered component entries.
 pub fn registered_entries() -> Vec<ComponentManifestEntry> {
-    let guard = REGISTRY
-        .lock()
-        .expect("component registry mutex poisoned");
+    let guard = REGISTRY.lock().expect("component registry mutex poisoned");
     let mut entries = guard.clone();
     entries.sort_by(|a, b| a.type_name.cmp(&b.type_name));
     entries
@@ -53,11 +52,11 @@ pub fn registered_entries() -> Vec<ComponentManifestEntry> {
 /// Writes the manifest to the provided JSON file path.
 pub fn write_manifest_json(path: &Path) -> std::io::Result<()> {
     let entries = registered_entries();
-    let manifest = ComponentManifest { components: entries };
+    let manifest = ComponentManifest {
+        components: entries,
+    };
     let json = serde_json::to_vec_pretty(&manifest).expect("manifest serialization should succeed");
-    std::fs::create_dir_all(
-        path.parent().unwrap_or_else(|| Path::new(".")),
-    )?;
+    std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
     std::fs::write(path, json)
 }
 
@@ -130,7 +129,10 @@ mod tests {
     fn registry_collects_unique_entries() {
         let entries = registered_entries();
         assert!(entries.len() >= 2);
-        let mut hashes = entries.iter().map(|entry| entry.stable_hash).collect::<Vec<_>>();
+        let mut hashes = entries
+            .iter()
+            .map(|entry| entry.stable_hash)
+            .collect::<Vec<_>>();
         hashes.sort();
         let before = hashes.len();
         hashes.dedup();
@@ -140,8 +142,16 @@ mod tests {
     #[test]
     fn manifest_writes_to_disk() {
         let entries = registered_entries();
-        assert!(entries.iter().any(|entry| entry.type_name.ends_with("Position")));
-        assert!(entries.iter().any(|entry| entry.type_name.ends_with("Velocity")));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.type_name.ends_with("Position"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.type_name.ends_with("Velocity"))
+        );
         let tmp_dir = tempfile::tempdir().expect("tmpdir");
         let path = tmp_dir.path().join("manifest.json");
         write_manifest_json(&path).expect("write manifest");

@@ -14,7 +14,9 @@ fn main() {
         println!("cargo:rerun-if-changed={schema}");
     }
 
-    let flatc_path = which_flatc().expect("flatc compiler not found; install from https://flatbuffers.dev or set FLATC env var");
+    let flatc_path = which_flatc().expect(
+        "flatc compiler not found; install from https://flatbuffers.dev or set FLATC env var",
+    );
 
     let rust_out = out_dir.join("flatbuffers");
     let cpp_out = out_dir.join("flatbuffers_cpp");
@@ -25,9 +27,9 @@ fn main() {
     create_dir(&ts_out);
 
     for schema in &schema_files {
-    compile_schema(&flatc_path, &manifest_dir, schema, &["--rust"], &rust_out);
-    compile_schema(&flatc_path, &manifest_dir, schema, &["--cpp"], &cpp_out);
-    compile_schema(&flatc_path, &manifest_dir, schema, &["--ts"], &ts_out);
+        compile_schema(&flatc_path, &manifest_dir, schema, &["--rust"], &rust_out);
+        compile_schema(&flatc_path, &manifest_dir, schema, &["--cpp"], &cpp_out);
+        compile_schema(&flatc_path, &manifest_dir, schema, &["--ts"], &ts_out);
     }
 
     // Copy TypeScript and C++ outputs into target sidecar directories for developer consumption.
@@ -53,7 +55,13 @@ fn which_flatc() -> Option<PathBuf> {
     None
 }
 
-fn compile_schema(flatc_path: &Path, manifest_dir: &Path, schema: &str, language: &[&str], out_dir: &Path) {
+fn compile_schema(
+    flatc_path: &Path,
+    manifest_dir: &Path,
+    schema: &str,
+    language: &[&str],
+    out_dir: &Path,
+) {
     let status = Command::new(flatc_path)
         .current_dir(manifest_dir)
         .args(language)

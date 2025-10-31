@@ -1,9 +1,33 @@
 pub mod schema;
 
+#[cfg(feature = "network-quic")]
+pub mod transport;
+
+#[cfg(not(feature = "network-quic"))]
+pub mod transport {
+    use super::TransportDiagnostics;
+
+    #[derive(Clone, Default)]
+    pub struct TransportMetricsHandle;
+
+    impl TransportMetricsHandle {
+        pub fn new() -> Self {
+            Self
+        }
+
+        pub fn latest(&self) -> Option<TransportDiagnostics> {
+            None
+        }
+    }
+}
+
 #[cfg(has_generated_network_schema)]
 #[allow(dead_code)]
 pub mod wire {
-    include!(concat!(env!("OUT_DIR"), "/flatbuffers/network_generated.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/flatbuffers/network_generated.rs"
+    ));
 }
 
 #[cfg(not(has_generated_network_schema))]
@@ -18,6 +42,15 @@ use crate::ecs::Entity;
 use serde::{Deserialize, Serialize};
 use std::any::TypeId;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct TransportDiagnostics {
+    pub rtt_ms: f32,
+    pub jitter_ms: f32,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub compression_ratio: f32,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct EntityHandle {
@@ -135,6 +168,7 @@ impl ChangeSet {
 pub struct NetworkSession {
     sequence: u64,
     advertised_components: Vec<ComponentDescriptor>,
+    transport_metrics: Option<transport::TransportMetricsHandle>,
 }
 
 impl NetworkSession {
@@ -142,11 +176,35 @@ impl NetworkSession {
         Self {
             sequence: 0,
             advertised_components: Vec::new(),
+            transport_metrics: None,
         }
     }
 
     pub fn connect() -> Self {
         Self::new()
+    }
+
+    pub fn with_transport_metrics(handle: transport::TransportMetricsHandle) -> Self {
+        Self {
+            sequence: 0,
+            advertised_components: Vec::new(),
+            transport_metrics: Some(handle),
+        }
+    }
+
+    pub fn attach_transport_metrics(&mut self, handle: transport::TransportMetricsHandle) {
+        self.transport_metrics = Some(handle);
+    }
+
+    pub fn transport_metrics(&self) -> Option<TransportDiagnostics> {
+        self.transport_metrics
+            .as_ref()
+            .and_then(|handle| handle.latest())
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn attach_transport_session(&mut self, session: &transport::TransportSession) {
+        self.transport_metrics = Some(session.metrics_handle());
     }
 
     pub fn next_sequence(&mut self) -> u64 {
@@ -168,7 +226,7 @@ impl NetworkSession {
     }
 }
 
-fn current_time_millis() -> u64 {
+pub(crate) fn current_time_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -207,13 +265,16 @@ mod tests {
     #[cfg(has_generated_network_schema)]
     #[test]
     fn flatbuffer_session_hello_roundtrip() {
+        use super::wire::theta::net::{
+            self, Compression, MessageBody, MessageEnvelopeArgs, PacketHeaderArgs, SessionHelloArgs,
+        };
         use flatbuffers::{FlatBufferBuilder, UnionWIPOffset};
-        use super::wire::theta::net::{self, Compression, MessageBody, MessageEnvelopeArgs, PacketHeaderArgs, SessionHelloArgs};
 
         let mut builder = FlatBufferBuilder::new();
         let client_nonce = builder.create_vector(&[1u8, 2, 3, 4]);
         let capabilities = builder.create_vector(&[7u32, 11u32]);
         let auth_token = builder.create_string("token");
+        let client_public_key = builder.create_vector(&[9u8; 32]);
 
         let header = net::PacketHeader::create(
             &mut builder,
@@ -233,10 +294,11 @@ mod tests {
                 client_nonce: Some(client_nonce),
                 requested_capabilities: Some(capabilities),
                 auth_token: Some(auth_token),
+                client_public_key: Some(client_public_key),
             },
         );
 
-    let hello_union = flatbuffers::WIPOffset::<UnionWIPOffset>::new(hello.value());
+        let hello_union = flatbuffers::WIPOffset::<UnionWIPOffset>::new(hello.value());
 
         let envelope = net::MessageEnvelope::create(
             &mut builder,
@@ -257,16 +319,10 @@ mod tests {
         assert_eq!(parsed_header.compression(), Compression::None);
         assert_eq!(parsed_header.schema_hash(), 0xDEAD_BEEFu64);
 
-        let session = parsed
-            .body_as_session_hello()
-            .expect("session hello body");
+        let session = parsed.body_as_session_hello().expect("session hello body");
         assert_eq!(session.protocol_version(), 1);
         assert_eq!(session.schema_hash(), 0xDEAD_BEEFu64);
-        let nonce: Vec<u8> = session
-            .client_nonce()
-            .expect("nonce")
-            .iter()
-            .collect();
+        let nonce: Vec<u8> = session.client_nonce().expect("nonce").iter().collect();
         assert_eq!(nonce, vec![1, 2, 3, 4]);
         let caps: Vec<u32> = session
             .requested_capabilities()
@@ -275,5 +331,12 @@ mod tests {
             .collect();
         assert_eq!(caps, vec![7, 11]);
         assert_eq!(session.auth_token(), Some("token"));
+        let public_key: Vec<u8> = session
+            .client_public_key()
+            .expect("client public key")
+            .iter()
+            .collect();
+        assert_eq!(public_key.len(), 32);
+        assert!(public_key.iter().all(|byte| *byte == 9));
     }
 }

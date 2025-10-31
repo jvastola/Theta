@@ -25,6 +25,7 @@ table SessionHello {
   client_nonce:[ubyte];
   requested_capabilities:[uint];
   auth_token:string;
+  client_public_key:[ubyte];
 }
 
 table SessionAcknowledge {
@@ -34,6 +35,7 @@ table SessionAcknowledge {
   session_id:ulong;
   assigned_role:uint;
   capability_mask:[uint];
+  server_public_key:[ubyte];
 }
 
 table ComponentDescriptor {
@@ -75,12 +77,20 @@ table AssetTransfer {
   chunks:[AssetChunk];
 }
 
+table Heartbeat {
+  sequence_id:ulong;
+  timestamp_ms:ulong;
+  reported_rtt_ms:uint;
+  jitter_ms:uint;
+}
+
 union MessageBody {
   SessionHello,
   SessionAcknowledge,
   ComponentDelta,
   CommandLogEntry,
-  AssetTransfer
+  AssetTransfer,
+  Heartbeat
 }
 
 table MessageEnvelope {

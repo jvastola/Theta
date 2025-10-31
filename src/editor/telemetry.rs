@@ -23,6 +23,7 @@ pub struct FrameTelemetry {
     pub average_frame_time: f32,
     pub stage_samples: Vec<StageSample>,
     pub controller_trigger: [f32; 2],
+    pub transport: Option<crate::network::TransportDiagnostics>,
 }
 
 impl FrameTelemetry {
@@ -57,7 +58,16 @@ impl FrameTelemetry {
             average_frame_time,
             stage_samples,
             controller_trigger,
+            transport: None,
         }
+    }
+
+    pub fn with_transport_metrics(
+        mut self,
+        metrics: Option<crate::network::TransportDiagnostics>,
+    ) -> Self {
+        self.transport = metrics;
+        self
     }
 }
 
@@ -99,7 +109,12 @@ impl Default for TelemetryReplicator {
 
 impl TelemetryReplicator {
     pub fn publish(&mut self, entity: Entity, telemetry: &FrameTelemetry) {
-        match serde_json::to_vec(telemetry) {
+        let mut enriched = telemetry.clone();
+        if enriched.transport.is_none() {
+            enriched.transport = self.session.transport_metrics();
+        }
+
+        match serde_json::to_vec(&enriched) {
             Ok(bytes) => {
                 self.session.advertise_component(ComponentDescriptor {
                     key: ComponentKey::of::<TelemetryComponent>(),
@@ -201,6 +216,17 @@ impl TelemetryOverlay {
             "  Triggers  L {:.2} | R {:.2}",
             latest.controller_trigger[0], latest.controller_trigger[1]
         ));
+
+        if let Some(metrics) = &latest.transport {
+            lines.push(format!(
+                "  Network  RTT {:>6.2} ms jitter {:>6.2} ms packets {}/{} ratio {:.2}",
+                metrics.rtt_ms,
+                metrics.jitter_ms,
+                metrics.packets_sent,
+                metrics.packets_received,
+                metrics.compression_ratio
+            ));
+        }
 
         Some(lines.join("\n"))
     }

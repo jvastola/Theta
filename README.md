@@ -28,6 +28,7 @@ Each subsystem will be designed as a distinct module crate to allow modular deve
 - ECS demo world simulates actor motion, editor selection state, and captures VR input samples (head + controllers).
 - Renderer ships with a null backend plus a feature-gated `wgpu` backend that reuses per-eye swapchain textures and forwards GPU submissions to the VR bridge.
 - VR layer provides a simulated input provider by default, with a feature-gated OpenXR provider (`vr-openxr`) that loads the runtime when available.
+- QUIC transport (`network-quic`) establishes Ed25519-backed handshakes with heartbeat telemetry feeding frame diagnostics.
 
 ## Immediate Roadmap
 1. **Render/VR Integration:** Connect `wgpu` swapchain images into OpenXR session swapchains for Quest 3 native presentation; promote OpenXR input from simulation to live action polling.
@@ -56,6 +57,7 @@ Each subsystem will be designed as a distinct module crate to allow modular deve
 - Ensure code is VR-testable from Day 1 (mocked device inputs, simulation harnesses).
 - Install the FlatBuffers compiler (`flatc`) and ensure it is discoverable on the PATH for schema code generation.
 - Regenerate the component manifest with `cargo run --bin generate_manifest` whenever replicated ECS components change; CI will fail if `schemas/component_manifest.json` is stale.
+- Enable QUIC development flows with `cargo test --features network-quic` to validate handshakes and heartbeat diagnostics on the local loopback server.
 
 ## Contribution Workflow
 - Maintain clean git history; prefer feature branches with descriptive commits.

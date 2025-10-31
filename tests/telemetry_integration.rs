@@ -1,6 +1,6 @@
 use theta_engine::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
-use theta_engine::engine::schedule::Stage;
 use theta_engine::engine::Engine;
+use theta_engine::engine::schedule::Stage;
 use theta_engine::network::DiffPayload;
 
 #[test]

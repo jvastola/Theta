@@ -17,6 +17,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     schema::assert_no_hash_collisions();
     schema::write_manifest_json(&output_path)?;
-    println!("[manifest] wrote {} entries to {}", schema::registered_entries().len(), output_path.display());
+    println!(
+        "[manifest] wrote {} entries to {}",
+        schema::registered_entries().len(),
+        output_path.display()
+    );
     Ok(())
 }
