@@ -1,3 +1,4 @@
+pub mod command_log;
 pub mod replication;
 pub mod schema;
 

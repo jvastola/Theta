@@ -1,6 +1,6 @@
 use crate::ecs::World;
 use crate::network::{ComponentDescriptor, ComponentDiff, ComponentKey, DiffPayload, EntityHandle};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::to_vec;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};

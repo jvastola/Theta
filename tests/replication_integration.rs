@@ -65,7 +65,7 @@ fn full_snapshot_to_delta_convergence() {
     // Simulate client applying snapshot
     for chunk in snapshot.chunks() {
         for component in &chunk.components {
-            let entity = client_world.spawn();
+            let _entity = client_world.spawn();
             // In real implementation, would deserialize and apply to ECS
             // For this test, verify serialized bytes match
             if component.component.type_name.contains("Position") {
