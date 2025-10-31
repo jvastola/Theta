@@ -13,9 +13,9 @@ impl OpenXrInputProvider {
         let entry = Entry::load()
             .map_err(|err| VrError::new(format!("failed to load OpenXR loader: {err}")))?;
         let app_info = ApplicationInfo {
-            application_name: "PolyForge",
+            application_name: "Theta Engine",
             application_version: Version::new(0, 1, 0),
-            engine_name: "PolyForge",
+            engine_name: "Theta Engine",
             engine_version: Version::new(0, 1, 0),
         };
 

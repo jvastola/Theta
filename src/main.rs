@@ -1,3 +1,3 @@
 fn main() {
-    polyforge::run();
+    theta_engine::run();
 }

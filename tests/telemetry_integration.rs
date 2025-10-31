@@ -1,7 +1,7 @@
-use polyforge::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
-use polyforge::engine::Engine;
-use polyforge::engine::schedule::Stage;
-use polyforge::network::DiffPayload;
+use theta_engine::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
+use theta_engine::engine::schedule::Stage;
+use theta_engine::engine::Engine;
+use theta_engine::network::DiffPayload;
 
 #[test]
 fn engine_emits_change_sets_after_running() {
