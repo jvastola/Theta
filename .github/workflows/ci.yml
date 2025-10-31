@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install flatc
+        run: sudo apt-get update && sudo apt-get install -y flatbuffers-compiler
+
+      - name: Cargo fmt
+        run: cargo fmt -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --all-targets
+
+      - name: Generate component manifest
+        run: cargo run --bin generate_manifest
+
+      - name: Ensure manifest is up to date
+        run: git diff --exit-code -- schemas/component_manifest.json
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Schema compatibility check (wasm32)
+        run: cargo check --target wasm32-unknown-unknown --lib

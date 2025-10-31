@@ -540,3 +540,5 @@ impl Engine {
         }
     }
 }
+
+crate::register_component_types!(FrameStats, Transform, Velocity, EditorSelection);

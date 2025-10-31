@@ -224,6 +224,8 @@ impl<B: VrBridge> VrContext<B> {
     }
 }
 
+crate::register_component_types!(TrackedPose, ControllerState);
+
 fn identity_matrix() -> [[f32; 4]; 4] {
     [
         [1.0, 0.0, 0.0, 0.0],

@@ -159,6 +159,8 @@ impl Default for TelemetryOverlay {
     }
 }
 
+crate::register_component_types!(TelemetrySurface, TelemetryReplicator, TelemetryComponent);
+
 impl TelemetryOverlay {
     pub fn with_capacity(capacity: usize) -> Self {
         let capacity = capacity.max(1);

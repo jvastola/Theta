@@ -96,13 +96,57 @@ Define the foundational architecture for the Theta Engine VR-first game engine a
 4. **Multiplayer Collaboration:** Deterministic replication, session hosting, conflict resolution.
 5. **Performance Pass:** GPU optimizations, profiling tools, editor UX polish.
 
-## Open Questions
-- Short-term physics is provided via the Rapier crate for rapid iteration; plan to replace with a custom VR-optimized solver once interaction requirements are firm.
-- Primary hardware target is standalone headsets (e.g., Quest family), influencing build size, thermal budgets, and the need for optional tethered/PCVR enhancements.
-- Determine collaborative security model: proposed approach is role-based permissions with signed change sets, plus optional end-to-end encryption for peer channels, but authentication/authorization flows remain open.
+## Resolved Design Decisions
 
-## Next Steps
-- Drive `wgpu` integration toward headset compositor presentation (OpenXR swapchains), building atop the new per-eye texture reuse and GPU submission plumbing.
-- Promote the OpenXR provider from simulation passthrough to real action set polling and tracked pose updates, keeping the simulated fallback for desktop iteration.
-- Extend scheduler profiling with aggregation/export so editor overlays can visualize stage timings and surface read-only violations, and incorporate telemetry replication into the editor UI.
-- Draft networking protocol schema (Protobuf/FlatBuffers) for entity/component replication, integrating proposed security guardrails (role-based permissions, signed change sets).
+### Physics Integration Strategy
+**Decision:** Adopt Rapier as the long-term physics backend with VR-specific optimizations layered atop.
+
+**Rationale:**
+- Rapier provides proven performance on mobile ARM (Quest targets) with SIMD-optimized solvers and minimal allocations.
+- Custom solver development deferred indefinitely; engineering resources better spent on unique VR interaction mechanics.
+- VR-specific enhancements implemented as wrapper layers: hand collision zones with haptic feedback, predictive grab points, and comfort-mode smoothing for physics-driven cameras.
+- Feature-gate Rapier behind `physics-rapier` to preserve testability and allow future backend swaps if requirements evolve.
+
+### Hardware Target Priorities
+**Decision:** Optimize primarily for standalone Quest 3 (Snapdragon XR2 Gen 2); maintain PCVR compatibility via feature flags.
+
+**Rationale:**
+- Quest 3 represents largest VR user base and harshest performance envelope (72-90 Hz, 8 GB shared memory, thermal throttling).
+- Build size constraints: target <200 MB APK via aggressive symbol stripping, asset compression, and optional feature exclusion.
+- PCVR mode (`target-pcvr` feature) enables higher-fidelity rendering, denser ECS simulations, and relaxed thermal budgets for tethered/Link sessions.
+- Cross-platform testing matrix: Quest 3 native, Quest 3 Link, and SteamVR (Index/Vive) to validate OpenXR portability.
+- Future headset support (Apple Vision Pro, Pico) added opportunistically once Quest baseline is stable.
+
+### Collaborative Security & Authentication
+**Decision:** Implement role-based permissions (viewer, editor, admin) with Ed25519-signed command entries; defer centralized auth server to post-MVP.
+
+**Rationale:**
+- Initial sessions use peer-generated keypairs exchanged during handshake; sufficient for trusted small-group collaboration.
+- Role enforcement occurs at command validation layer: `CommandLogEntry` signatures verified against session roster before ECS application.
+- Transport security (QUIC TLS, WebRTC DTLS) protects against network eavesdropping; signed commands prevent impersonation.
+- Post-MVP: introduce optional OAuth2/OIDC integration for enterprise deployments requiring centralized identity; role mappings flow through `SessionAcknowledge` claims.
+- Account for WebRTC peer-to-peer topology: clients cross-verify signatures even when host is untrusted relay, preventing malicious command injection.
+
+## Next Steps (Updated October 31, 2025)
+
+### Sprint 1: Render & VR Integration (Priority: Critical)
+- Wire `wgpu` swapchain outputs into OpenXR session swapchains for real headset presentation, targeting Quest 3 native rendering at 72 Hz baseline.
+- Promote OpenXR provider from simulated passthrough to live action set polling and tracked pose updates, maintaining desktop fallback for CI/headless testing.
+- Validate stereo rendering pipeline with GPU profiling hooks; establish frame time budgets (<11ms for 90 Hz target).
+
+### Sprint 2: Networking Foundation (Priority: High)
+- Stand up async runtime (Tokio) and integrate `quinn` QUIC transport with TLS 1.3 handshake.
+- Author initial FlatBuffers schema for `SessionHello`, `ComponentDelta`, and `CommandLogEntry` messages; integrate `flatc` codegen into `build.rs`.
+- Implement component ID hashing (SipHash-2-4) and schema manifest generation with deterministic registration ordering.
+- Hook ECS change buffers into replication event pipeline with loopback validation tests.
+
+### Sprint 3: Physics & Editor Foundations (Priority: Medium)
+- Integrate Rapier3D behind `physics-rapier` feature flag with VR-specific wrapper layer (hand collision zones, haptic feedback hooks).
+- Flesh out mesh editor data model: half-edge topology, vertex/edge/face operations, and triangulation utilities.
+- Implement undo/redo command stack with ECS snapshot versioning; ensure commands serialize for network replication.
+- Add basic in-headset UI panels rendered via overlay pipeline (tool selection, property inspector).
+
+### Cross-Sprint Validation
+- Establish Quest 3 APK build pipeline with symbol stripping and asset compression (<200 MB target).
+- Add telemetry aggregation/export for scheduler profiling; visualize stage timings in desktop companion tool.
+- Extend integration test suite: headless VR session simulation, network replication convergence, mesh editor command replay.

@@ -30,20 +30,32 @@ Each subsystem will be designed as a distinct module crate to allow modular deve
 - VR layer provides a simulated input provider by default, with a feature-gated OpenXR provider (`vr-openxr`) that loads the runtime when available.
 
 ## Immediate Roadmap
-1. Connect `wgpu` swapchain images into OpenXR session swapchains for real headset presentation.
-2. Promote OpenXR input provider from simulated passthrough to live action polling and tracked pose updates.
-3. Stand up multiplayer skeleton (async runtime, networking service, replication events).
-4. Flesh out mesh editing domain model with undo/redo stacks and serialization.
+1. **Render/VR Integration:** Connect `wgpu` swapchain images into OpenXR session swapchains for Quest 3 native presentation; promote OpenXR input from simulation to live action polling.
+2. **Networking Skeleton:** Stand up QUIC transport with FlatBuffers schema, component ID hashing (SipHash-2-4), and ECS replication pipeline with loopback validation.
+3. **Physics & Editor:** Integrate Rapier3D with VR wrapper layers; flesh out half-edge mesh model with undo/redo command stack and serialization.
+4. **Collaboration Protocol:** Implement Ed25519-signed command entries, role-based permissions, and CRDT-style conflict resolution for multi-user editing.
+
+## Technical Decisions (Resolved October 2025)
+- **Physics Backend:** Rapier3D adopted long-term with VR-specific enhancements; custom solver deferred indefinitely.
+- **Hardware Target:** Optimize for Quest 3 standalone (72-90 Hz, <200 MB APK); maintain PCVR compatibility via feature flags.
+- **Network Security:** Role-based permissions (viewer/editor/admin) with Ed25519 command signing; transport security via QUIC TLS 1.3.
+- **Asset Protocol:** Inline `AssetTransfer` messages via FlatBuffers schema for low-latency collaborative editing; optional CDN manifest pointers deferred to production builds.
+- **Schema Hashing:** 64-bit SipHash-2-4 for component IDs with deterministic registration order enforced by declarative macros; CI validates cross-platform consistency.
 
 ## Feature Flags
 - `render-wgpu`: enables the `wgpu` backend and GPU submission plumbing.
 - `vr-openxr`: enables the OpenXR input provider (falls back to simulated input if the runtime cannot be loaded).
+- `physics-rapier`: integrates Rapier3D physics engine with VR-optimized wrapper layers.
+- `target-pcvr`: enables PCVR-specific optimizations (higher fidelity rendering, relaxed thermal constraints).
+- `network-quic`: enables QUIC transport layer for multiplayer replication and collaboration.
 
 ## Development Notes
 - Target Rust 2024 edition.
 - Favor data-oriented patterns and explicit control over memory/layout.
 - Enforce modular boundaries to keep runtime/editor networking decoupled.
 - Ensure code is VR-testable from Day 1 (mocked device inputs, simulation harnesses).
+- Install the FlatBuffers compiler (`flatc`) and ensure it is discoverable on the PATH for schema code generation.
+- Regenerate the component manifest with `cargo run --bin generate_manifest` whenever replicated ECS components change; CI will fail if `schemas/component_manifest.json` is stale.
 
 ## Contribution Workflow
 - Maintain clean git history; prefer feature branches with descriptive commits.

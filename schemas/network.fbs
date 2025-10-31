@@ -1,0 +1,91 @@
+namespace theta.net;
+
+enum Compression : ushort {
+  None = 0,
+  Zstd = 1,
+  Delta = 2
+}
+
+enum ResolutionStrategy : ushort {
+  LastWriterWins = 0,
+  Merge = 1,
+  Reject = 2
+}
+
+table PacketHeader {
+  sequence_id:ulong;
+  timestamp_ms:ulong;
+  compression:Compression = None;
+  schema_hash:ulong;
+}
+
+table SessionHello {
+  protocol_version:uint;
+  schema_hash:ulong;
+  client_nonce:[ubyte];
+  requested_capabilities:[uint];
+  auth_token:string;
+}
+
+table SessionAcknowledge {
+  protocol_version:uint;
+  schema_hash:ulong;
+  server_nonce:[ubyte];
+  session_id:ulong;
+  assigned_role:uint;
+  capability_mask:[uint];
+}
+
+table ComponentDescriptor {
+  component_id:ulong;
+  type_name:string;
+}
+
+table ComponentEntry {
+  entity_id:ulong;
+  component_id:ulong;
+  revision:uint;
+  diff_payload:[ubyte];
+}
+
+table ComponentDelta {
+  entries:[ComponentEntry];
+  descriptors:[ComponentDescriptor];
+}
+
+table CommandLogEntry {
+  lamport_clock:ulong;
+  author_id:[ubyte];
+  command_type:ulong;
+  payload:[ubyte];
+  signature:[ubyte];
+  resolution_strategy:ResolutionStrategy = LastWriterWins;
+}
+
+table AssetChunk {
+  asset_id:[ubyte];
+  chunk_index:uint;
+  total_chunks:uint;
+  payload:[ubyte];
+  checksum:[ubyte];
+  resume_token:[ubyte];
+}
+
+table AssetTransfer {
+  chunks:[AssetChunk];
+}
+
+union MessageBody {
+  SessionHello,
+  SessionAcknowledge,
+  ComponentDelta,
+  CommandLogEntry,
+  AssetTransfer
+}
+
+table MessageEnvelope {
+  header:PacketHeader;
+  body:MessageBody;
+}
+
+root_type MessageEnvelope;

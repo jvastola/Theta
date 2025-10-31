@@ -1,0 +1,40 @@
+{
+  "components": [
+    {
+      "type_name": "theta_engine::editor::telemetry::TelemetryComponent",
+      "stable_hash": 14389217213560918630
+    },
+    {
+      "type_name": "theta_engine::editor::telemetry::TelemetryReplicator",
+      "stable_hash": 10686417544288275499
+    },
+    {
+      "type_name": "theta_engine::editor::telemetry::TelemetrySurface",
+      "stable_hash": 3418849088818201725
+    },
+    {
+      "type_name": "theta_engine::engine::EditorSelection",
+      "stable_hash": 2882055569926755522
+    },
+    {
+      "type_name": "theta_engine::engine::FrameStats",
+      "stable_hash": 13211231290195863182
+    },
+    {
+      "type_name": "theta_engine::engine::Transform",
+      "stable_hash": 307239030102966131
+    },
+    {
+      "type_name": "theta_engine::engine::Velocity",
+      "stable_hash": 609515788690594327
+    },
+    {
+      "type_name": "theta_engine::vr::ControllerState",
+      "stable_hash": 6477194880816290655
+    },
+    {
+      "type_name": "theta_engine::vr::TrackedPose",
+      "stable_hash": 5904904698127644167
+    }
+  ]
+}

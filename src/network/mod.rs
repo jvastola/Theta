@@ -1,8 +1,22 @@
+pub mod schema;
+
+#[cfg(has_generated_network_schema)]
+#[allow(dead_code)]
+pub mod wire {
+    include!(concat!(env!("OUT_DIR"), "/flatbuffers/network_generated.rs"));
+}
+
+#[cfg(not(has_generated_network_schema))]
+#[allow(dead_code)]
+pub mod wire {
+    //! Stub module used when FlatBuffers bindings have not been generated yet.
+    //! Build scripts set the `has_generated_network_schema` cfg once `flatc`
+    //! runs successfully.
+}
+
 use crate::ecs::Entity;
 use serde::{Deserialize, Serialize};
 use std::any::TypeId;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -40,7 +54,7 @@ impl ComponentKey {
     pub fn from_type_id(_type_id: TypeId, type_name: &'static str) -> Self {
         Self {
             type_name: type_name.to_string(),
-            type_hash: hash_type_name(type_name),
+            type_hash: crate::network::schema::stable_component_hash(type_name),
         }
     }
 }
@@ -154,12 +168,6 @@ impl NetworkSession {
     }
 }
 
-fn hash_type_name(type_name: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    type_name.hash(&mut hasher);
-    hasher.finish()
-}
-
 fn current_time_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -194,5 +202,78 @@ mod tests {
         let output = serde_json::to_string(&change_set).expect("serialization should succeed");
         assert!(output.contains("sequence"));
         assert!(output.contains("descriptors"));
+    }
+
+    #[cfg(has_generated_network_schema)]
+    #[test]
+    fn flatbuffer_session_hello_roundtrip() {
+        use flatbuffers::{FlatBufferBuilder, UnionWIPOffset};
+        use super::wire::theta::net::{self, Compression, MessageBody, MessageEnvelopeArgs, PacketHeaderArgs, SessionHelloArgs};
+
+        let mut builder = FlatBufferBuilder::new();
+        let client_nonce = builder.create_vector(&[1u8, 2, 3, 4]);
+        let capabilities = builder.create_vector(&[7u32, 11u32]);
+        let auth_token = builder.create_string("token");
+
+        let header = net::PacketHeader::create(
+            &mut builder,
+            &PacketHeaderArgs {
+                sequence_id: 42,
+                timestamp_ms: 1234,
+                compression: Compression::None,
+                schema_hash: 0xDEAD_BEEFu64,
+            },
+        );
+
+        let hello = net::SessionHello::create(
+            &mut builder,
+            &SessionHelloArgs {
+                protocol_version: 1,
+                schema_hash: 0xDEAD_BEEFu64,
+                client_nonce: Some(client_nonce),
+                requested_capabilities: Some(capabilities),
+                auth_token: Some(auth_token),
+            },
+        );
+
+    let hello_union = flatbuffers::WIPOffset::<UnionWIPOffset>::new(hello.value());
+
+        let envelope = net::MessageEnvelope::create(
+            &mut builder,
+            &MessageEnvelopeArgs {
+                header: Some(header),
+                body_type: MessageBody::SessionHello,
+                body: Some(hello_union),
+            },
+        );
+
+        net::finish_message_envelope_buffer(&mut builder, envelope);
+        let bytes = builder.finished_data();
+
+        let parsed = net::root_as_message_envelope(bytes).expect("valid envelope");
+        let parsed_header = parsed.header().expect("header");
+        assert_eq!(parsed_header.sequence_id(), 42);
+        assert_eq!(parsed_header.timestamp_ms(), 1234);
+        assert_eq!(parsed_header.compression(), Compression::None);
+        assert_eq!(parsed_header.schema_hash(), 0xDEAD_BEEFu64);
+
+        let session = parsed
+            .body_as_session_hello()
+            .expect("session hello body");
+        assert_eq!(session.protocol_version(), 1);
+        assert_eq!(session.schema_hash(), 0xDEAD_BEEFu64);
+        let nonce: Vec<u8> = session
+            .client_nonce()
+            .expect("nonce")
+            .iter()
+            .collect();
+        assert_eq!(nonce, vec![1, 2, 3, 4]);
+        let caps: Vec<u32> = session
+            .requested_capabilities()
+            .expect("capabilities")
+            .iter()
+            .collect();
+        assert_eq!(caps, vec![7, 11]);
+        assert_eq!(session.auth_token(), Some("token"));
     }
 }
