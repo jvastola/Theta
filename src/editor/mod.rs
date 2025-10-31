@@ -1,3 +1,7 @@
+pub mod telemetry;
+
+pub use telemetry::{FrameTelemetry, StageSample, TelemetryReplicator, TelemetrySurface};
+
 pub struct MeshEditor;
 
 impl MeshEditor {

@@ -1,6 +1,7 @@
 pub mod schedule;
 
 use crate::ecs::World;
+use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
 #[cfg(feature = "vr-openxr")]
 use crate::vr::openxr::OpenXrInputProvider;
@@ -19,6 +20,7 @@ pub struct Engine {
     target_frame_time: f32,
     max_frames: u32,
     frame_stats_entity: Option<crate::ecs::Entity>,
+    telemetry_entity: Option<crate::ecs::Entity>,
     input_provider: Arc<Mutex<Box<dyn VrInputProvider>>>,
 }
 
@@ -42,6 +44,7 @@ impl Engine {
             target_frame_time: 1.0 / 60.0,
             max_frames: DEFAULT_MAX_FRAMES,
             frame_stats_entity: None,
+            telemetry_entity: None,
             input_provider,
         };
 
@@ -118,6 +121,8 @@ impl Engine {
             world.register_component::<EditorSelection>();
             world.register_component::<TrackedPose>();
             world.register_component::<ControllerState>();
+            world.register_component::<TelemetrySurface>();
+            world.register_component::<TelemetryReplicator>();
         }
 
         let stats_entity = {
@@ -125,6 +130,12 @@ impl Engine {
             initialize_frame_stats(world)
         };
         self.frame_stats_entity = Some(stats_entity);
+
+        let telemetry_entity = {
+            let world = self.scheduler.world_mut();
+            initialize_telemetry(world)
+        };
+        self.telemetry_entity = Some(telemetry_entity);
 
         let head_entity = {
             let world = self.scheduler.world_mut();
@@ -219,8 +230,8 @@ impl Engine {
                     stats.controller_trigger[1]
                 );
                 println!(
-                    "           stage timings ms {:?} (parallel {:?})",
-                    stats.stage_durations_ms, stats.stage_parallel_ms
+                    "           stage timings ms {:?} (seq {:?}, par {:?})",
+                    stats.stage_durations_ms, stats.stage_sequential_ms, stats.stage_parallel_ms
                 );
                 for (stage, &violation) in Stage::ordered()
                     .iter()
@@ -302,6 +313,7 @@ struct FrameStats {
     average_frame_time: f32,
     last_actor_position: [f32; 3],
     stage_durations_ms: [f32; Stage::count()],
+    stage_sequential_ms: [f32; Stage::count()],
     stage_parallel_ms: [f32; Stage::count()],
     stage_read_only_violation: [bool; Stage::count()],
     controller_trigger: [f32; 2],
@@ -365,6 +377,17 @@ fn initialize_frame_stats(world: &mut World) -> crate::ecs::Entity {
     world
         .insert(entity, FrameStats::default())
         .expect("frame stats component should insert");
+    entity
+}
+
+fn initialize_telemetry(world: &mut World) -> crate::ecs::Entity {
+    let entity = world.spawn();
+    world
+        .insert(entity, TelemetrySurface::default())
+        .expect("telemetry surface component should insert");
+    world
+        .insert(entity, TelemetryReplicator::default())
+        .expect("telemetry replicator component should insert");
     entity
 }
 
@@ -438,22 +461,50 @@ fn build_input_provider() -> Arc<Mutex<Box<dyn VrInputProvider>>> {
 
 impl Engine {
     fn update_frame_diagnostics(&mut self) {
-        let Some(stats_entity) = self.frame_stats_entity else {
-            return;
-        };
-
         let profile = self.scheduler.last_profile().clone();
-        if let Some(stats) = self
-            .scheduler
-            .world_mut()
-            .get_mut::<FrameStats>(stats_entity)
-        {
-            for stage in Stage::ordered() {
-                let index = stage.index();
-                if let Some(stage_profile) = profile.stage(stage) {
-                    stats.stage_durations_ms[index] = stage_profile.total_ms();
-                    stats.stage_parallel_ms[index] = stage_profile.parallel_ms();
-                    stats.stage_read_only_violation[index] = stage_profile.read_only_violation;
+        let mut telemetry_sample = None;
+
+        if let Some(stats_entity) = self.frame_stats_entity {
+            if let Some(stats) = self
+                .scheduler
+                .world_mut()
+                .get_mut::<FrameStats>(stats_entity)
+            {
+                for stage in Stage::ordered() {
+                    let index = stage.index();
+                    if let Some(stage_profile) = profile.stage(stage) {
+                        stats.stage_durations_ms[index] = stage_profile.total_ms();
+                        stats.stage_sequential_ms[index] = stage_profile.sequential_ms();
+                        stats.stage_parallel_ms[index] = stage_profile.parallel_ms();
+                        stats.stage_read_only_violation[index] = stage_profile.read_only_violation;
+                    }
+                }
+
+                telemetry_sample = Some(FrameTelemetry::from_stage_arrays(
+                    stats.frames,
+                    stats.average_frame_time,
+                    &stats.stage_durations_ms,
+                    &stats.stage_sequential_ms,
+                    &stats.stage_parallel_ms,
+                    &stats.stage_read_only_violation,
+                    stats.controller_trigger,
+                ));
+            }
+        }
+
+        if let (Some(entity), Some(sample)) = (self.telemetry_entity, telemetry_sample) {
+            let world = self.scheduler.world_mut();
+            let mut latest_to_publish = None;
+
+            if let Some(surface) = world.get_mut::<TelemetrySurface>(entity) {
+                if surface.record(sample) {
+                    latest_to_publish = surface.latest().cloned();
+                }
+            }
+
+            if let Some(latest) = latest_to_publish {
+                if let Some(replicator) = world.get_mut::<TelemetryReplicator>(entity) {
+                    replicator.publish(entity, &latest);
                 }
             }
         }
