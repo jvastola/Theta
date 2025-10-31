@@ -53,8 +53,8 @@ impl CommandPipeline {
         if !new_entries.is_empty() {
             self.last_published = self.log.latest_id();
             let batch = self.session.craft_command_batch(new_entries);
-            let packet = CommandPacket::from_batch(&batch)
-                .expect("serialize command batch for transport");
+            let packet =
+                CommandPacket::from_batch(&batch).expect("serialize command batch for transport");
             self.pending_packets.push(packet);
         }
         Ok(())
@@ -107,9 +107,7 @@ mod tests {
 
         let packets = pipeline.drain_packets();
         assert_eq!(packets.len(), 1);
-        let batch = packets[0]
-            .decode()
-            .expect("decode command packet payload");
+        let batch = packets[0].decode().expect("decode command packet payload");
         assert_eq!(batch.entries.len(), 1);
         let entry = &batch.entries[0];
         assert_eq!(entry.payload.command_type, CMD_SELECTION_HIGHLIGHT);

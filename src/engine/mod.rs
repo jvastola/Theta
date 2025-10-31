@@ -606,7 +606,7 @@ impl Engine {
                         {
                             let world = self.scheduler.world_mut();
                             if let Some(outbox) = world.get_mut::<CommandOutbox>(entity) {
-                                outbox.ingest(decoded_batches.clone());
+                                outbox.ingest(decoded_batches);
                                 outbox_packets = Some(outbox.drain_packets());
                             }
                         }
@@ -618,6 +618,9 @@ impl Engine {
                         }
                     }
 
+                    // If no packets were drained from the outbox, fall back to the original packets.
+                    // This ensures that any command packets not processed by the outbox are still queued for transport,
+                    // preventing loss of commands in cases where the outbox is empty or not used.
                     if packets_to_queue.is_empty() {
                         packets_to_queue = packets.clone();
                     }
