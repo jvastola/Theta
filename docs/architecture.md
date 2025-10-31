@@ -95,12 +95,12 @@ Define the foundational architecture for the Codex VR-first game engine and edit
 5. **Performance Pass:** GPU optimizations, profiling tools, editor UX polish.
 
 ## Open Questions
-- Which physics library (if any) complements the VR interactions? (e.g., Rapier vs. custom)
-- Target headset priority (Quest standalone vs. PCVR) informs rendering backend choices.
-- Security model for collaborative editing beyond trusted peers.
+- Short-term physics is provided via the Rapier crate for rapid iteration; plan to replace with a custom VR-optimized solver once interaction requirements are firm.
+- Primary hardware target is standalone headsets (e.g., Quest family), influencing build size, thermal budgets, and the need for optional tethered/PCVR enhancements.
+- Determine collaborative security model: proposed approach is role-based permissions with signed change sets, plus optional end-to-end encryption for peer channels, but authentication/authorization flows remain open.
 
 ## Next Steps
 - Drive `wgpu` integration toward headset compositor presentation (OpenXR swapchains), building atop the new per-eye texture reuse and GPU submission plumbing.
 - Promote the OpenXR provider from simulation passthrough to real action set polling and tracked pose updates, keeping the simulated fallback for desktop iteration.
-- Extend scheduler profiling with aggregation/export so editor overlays can visualize stage timings and surface read-only violations.
-- Draft networking protocol schema (Protobuf/FlatBuffers) for entity/component replication.
+- Extend scheduler profiling with aggregation/export so editor overlays can visualize stage timings and surface read-only violations, and incorporate telemetry replication into the editor UI.
+- Draft networking protocol schema (Protobuf/FlatBuffers) for entity/component replication, integrating proposed security guardrails (role-based permissions, signed change sets).

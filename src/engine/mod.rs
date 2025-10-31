@@ -108,6 +108,10 @@ impl Engine {
         self.scheduler.world()
     }
 
+    pub fn telemetry_entity(&self) -> Option<crate::ecs::Entity> {
+        self.telemetry_entity
+    }
+
     pub fn world_mut(&mut self) -> &mut crate::ecs::World {
         self.scheduler.world_mut()
     }

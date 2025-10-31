@@ -129,23 +129,44 @@ pub struct TelemetryComponent;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::DiffPayload;
+    use crate::network::{ChangeSet, DiffPayload};
+    use proptest::prelude::*;
 
-    fn sample_arrays(frame: u64) -> FrameTelemetry {
+    fn build_sample(
+        frame: u64,
+        average: f32,
+        totals: [f32; Stage::count()],
+        sequential: [f32; Stage::count()],
+        parallel: [f32; Stage::count()],
+        violations: [bool; Stage::count()],
+        triggers: [f32; 2],
+    ) -> FrameTelemetry {
         FrameTelemetry::from_stage_arrays(
             frame,
+            average,
+            &totals,
+            &sequential,
+            &parallel,
+            &violations,
+            triggers,
+        )
+    }
+
+    fn static_sample(frame: u64) -> FrameTelemetry {
+        build_sample(
+            frame,
             4.2,
-            &[1.0, 2.0, 3.0, 4.0],
-            &[0.5, 1.0, 1.5, 2.0],
-            &[0.25, 0.5, 0.75, 1.0],
-            &[false, true, false, true],
+            [1.0, 2.0, 3.0, 4.0],
+            [0.5, 1.0, 1.5, 2.0],
+            [0.25, 0.5, 0.75, 1.0],
+            [false, true, false, true],
             [0.1, 0.9],
         )
     }
 
     #[test]
     fn frame_samples_preserve_stage_metadata() {
-        let telemetry = sample_arrays(7);
+        let telemetry = static_sample(7);
         assert_eq!(telemetry.stage_samples.len(), Stage::count());
         for (sample, stage) in telemetry.stage_samples.iter().zip(Stage::ordered()) {
             assert_eq!(sample.stage, stage.label());
@@ -159,13 +180,13 @@ mod tests {
     fn telemetry_surface_detects_new_frames() {
         let mut surface = TelemetrySurface::default();
 
-        let first = sample_arrays(1);
+        let first = static_sample(1);
         assert!(surface.record(first));
 
-        let same_frame = sample_arrays(1);
+        let same_frame = static_sample(1);
         assert!(!surface.record(same_frame));
 
-        let next = sample_arrays(2);
+        let next = static_sample(2);
         assert!(surface.record(next.clone()));
         assert_eq!(surface.latest().map(|t| t.frame), Some(2));
     }
@@ -173,7 +194,7 @@ mod tests {
     #[test]
     fn replicator_serializes_change_sets() {
         let entity = Entity::new(12, 3);
-        let telemetry = sample_arrays(5);
+        let telemetry = static_sample(5);
         let mut replicator = TelemetryReplicator::default();
 
         replicator.publish(entity, &telemetry);
@@ -198,11 +219,95 @@ mod tests {
             _ => panic!("replicator should emit update payloads"),
         }
 
-        let follow_up = sample_arrays(6);
+        let follow_up = static_sample(6);
         replicator.publish(entity, &follow_up);
         let next_change = replicator
             .last_change_set()
             .expect("replicator should store newest change set");
         assert_eq!(next_change.sequence, 2);
+    }
+
+    proptest::prop_compose! {
+        fn stage_arrays()(values in proptest::array::uniform4(-2000i16..2000i16)) -> [f32; Stage::count()] {
+            values.map(|v| v as f32 / 10.0)
+        }
+    }
+
+    proptest::prop_compose! {
+        fn triggers()(values in proptest::array::uniform2(-100i16..100i16)) -> [f32; 2] {
+            values.map(|v| v as f32 / 10.0)
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn replicator_sequences_monotonic_under_interleaving(
+            ops in proptest::collection::vec(
+                (
+                    0usize..3,
+                    0u64..128,
+                    -500i16..500i16,
+                    stage_arrays(),
+                    stage_arrays(),
+                    stage_arrays(),
+                    proptest::array::uniform4(any::<bool>()),
+                    triggers(),
+                ),
+                1..32
+            )
+        ) {
+            const PUBLISHERS: usize = 3;
+            let mut replicators: [TelemetryReplicator; PUBLISHERS] = [
+                TelemetryReplicator::default(),
+                TelemetryReplicator::default(),
+                TelemetryReplicator::default(),
+            ];
+            let entities = [
+                Entity::new(101, 0),
+                Entity::new(202, 0),
+                Entity::new(303, 0),
+            ];
+            let mut history: [Vec<ChangeSet>; PUBLISHERS] = std::array::from_fn(|_| Vec::new());
+
+            for (publisher, frame, avg_i16, totals, sequential, parallel, violations, trigger_vals) in ops {
+                let index = publisher % PUBLISHERS;
+                let average = (avg_i16 as f32).abs() / 100.0 + 0.001;
+                let telemetry = build_sample(
+                    frame,
+                    average,
+                    totals,
+                    sequential,
+                    parallel,
+                    violations,
+                    trigger_vals,
+                );
+
+                replicators[index].publish(entities[index], &telemetry);
+                history[index].push(
+                    replicators[index]
+                        .last_change_set()
+                        .expect("change set after publish")
+                        .clone(),
+                );
+            }
+
+            for (index, changes) in history.iter().enumerate() {
+                for (sequence_idx, change) in changes.iter().enumerate() {
+                    assert_eq!(change.sequence, (sequence_idx as u64) + 1, "publisher {} sequence mismatch", index);
+                    assert_eq!(change.diffs.len(), 1);
+                    let diff = &change.diffs[0];
+                    assert_eq!(diff.entity.index, entities[index].index());
+                    assert_eq!(diff.entity.generation, entities[index].generation());
+                    match &diff.payload {
+                        DiffPayload::Update { bytes } => {
+                            let restored: FrameTelemetry = serde_json::from_slice(bytes)
+                                .expect("telemetry payload should deserialize");
+                            assert_eq!(restored.stage_samples.len(), Stage::count());
+                        }
+                        other => panic!("expected update payload, got {:?}", other),
+                    }
+                }
+            }
+        }
     }
 }
