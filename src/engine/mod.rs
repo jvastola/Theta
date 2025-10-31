@@ -11,6 +11,7 @@ use crate::vr::{
 use schedule::{Scheduler, Stage, System};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_MAX_FRAMES: u32 = 3;
 
@@ -330,7 +331,7 @@ struct FrameStats {
     controller_trigger: [f32; 2],
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Transform {
     position: [f32; 3],
 }
@@ -351,7 +352,7 @@ impl Transform {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Velocity {
     linear: [f32; 3],
 }

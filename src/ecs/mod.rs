@@ -60,6 +60,10 @@ impl<T: Component> ComponentMap<T> {
     fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
         self.entries.get_mut(&entity)
     }
+
+    fn iter(&self) -> impl Iterator<Item = (&Entity, &T)> {
+        self.entries.iter()
+    }
 }
 
 impl<T: Component> Default for ComponentMap<T> {
@@ -184,6 +188,12 @@ impl World {
             .get(entity.index as usize)
             .map(|record| record.alive && record.generation == entity.generation)
             .unwrap_or(false)
+    }
+
+    pub fn component_entries<T: Component>(&self) -> Vec<(Entity, &T)> {
+        self.typed_storage::<T>()
+            .map(|storage| storage.iter().map(|(entity, value)| (*entity, value)).collect())
+            .unwrap_or_default()
     }
 
     fn validate_entity(&self, entity: Entity) -> Result<(), EcsError> {

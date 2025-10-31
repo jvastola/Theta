@@ -1,4 +1,5 @@
 pub mod schema;
+pub mod replication;
 
 #[cfg(feature = "network-quic")]
 pub mod transport;

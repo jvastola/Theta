@@ -114,6 +114,8 @@
    - Add interest management system with spatial cell and tool scope filtering.
    - Wire replication events into ECS change buffers and validate deterministic convergence via loopback tests.
 
+   **Status (Oct 31, 2025):** Replication scaffolding landed in `network::replication` with JSON-backed snapshot chunking, delta tracking, and registry-driven component serialization. Phase plan captured in `docs/phase3_plan.md`; FlatBuffers encoding, interest filtering, and engine wiring scheduled next.
+
 4. **Phase 4 - Command Log & Conflict Resolution (Week 8-9)**
    - Layer CRDT-style command log with Lamport clocks and signature validation.
    - Implement conflict resolution strategies (last-writer-wins, merge, reject) per editor tool command type.

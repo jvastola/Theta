@@ -1,5 +1,7 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 #[cfg(feature = "vr-openxr")]
 pub mod openxr;
 
@@ -90,7 +92,7 @@ pub trait VrBridge: Send {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TrackedPose {
     pub position: [f32; 3],
     pub orientation: [f32; 4],
@@ -105,7 +107,7 @@ impl Default for TrackedPose {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct ControllerState {
     pub pose: TrackedPose,
     pub trigger: f32,
