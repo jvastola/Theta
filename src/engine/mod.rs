@@ -9,9 +9,9 @@ use crate::vr::{
     ControllerState, NullVrBridge, SimulatedInputProvider, TrackedPose, VrBridge, VrInputProvider,
 };
 use schedule::{Scheduler, Stage, System};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use serde::{Deserialize, Serialize};
 
 const DEFAULT_MAX_FRAMES: u32 = 3;
 

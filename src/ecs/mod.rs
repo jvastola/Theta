@@ -192,7 +192,12 @@ impl World {
 
     pub fn component_entries<T: Component>(&self) -> Vec<(Entity, &T)> {
         self.typed_storage::<T>()
-            .map(|storage| storage.iter().map(|(entity, value)| (*entity, value)).collect())
+            .map(|storage| {
+                storage
+                    .iter()
+                    .map(|(entity, value)| (*entity, value))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

@@ -1,10 +1,7 @@
-use theta_engine::ecs::World;
-use theta_engine::network::replication::{
-    DeltaTracker, ReplicationRegistry, WorldSnapshotBuilder,
-};
-use theta_engine::network::DiffPayload;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use theta_engine::ecs::World;
+use theta_engine::network::DiffPayload;
+use theta_engine::network::replication::{DeltaTracker, ReplicationRegistry, WorldSnapshotBuilder};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct Position {
@@ -25,8 +22,6 @@ fn full_snapshot_to_delta_convergence() {
     let mut registry = ReplicationRegistry::new();
     registry.register::<Position>();
     registry.register::<Velocity>();
-    let registry = Arc::new(registry);
-
     // Host world
     let mut host_world = World::new();
     host_world.register_component::<Position>();
@@ -62,7 +57,7 @@ fn full_snapshot_to_delta_convergence() {
         .expect("insert");
 
     // Build snapshot on host
-    let builder = WorldSnapshotBuilder::new(Arc::clone(&registry));
+    let builder = WorldSnapshotBuilder::new(&registry);
     let snapshot = builder.build(&host_world);
 
     assert_eq!(snapshot.total_components(), 2);
@@ -86,8 +81,8 @@ fn full_snapshot_to_delta_convergence() {
     }
 
     // Now simulate incremental updates via delta tracker
-    let mut tracker = DeltaTracker::new(Arc::clone(&registry));
-    let initial_delta = tracker.diff(&host_world);
+    let mut tracker = DeltaTracker::new();
+    let initial_delta = tracker.diff(&registry, &host_world);
     assert_eq!(initial_delta.diffs.len(), 2);
     assert_eq!(initial_delta.descriptors.len(), 2);
 
@@ -96,7 +91,7 @@ fn full_snapshot_to_delta_convergence() {
         pos.x = 10.0;
     }
 
-    let update_delta = tracker.diff(&host_world);
+    let update_delta = tracker.diff(&registry, &host_world);
     assert_eq!(update_delta.diffs.len(), 1);
     assert!(update_delta.descriptors.is_empty());
     assert!(matches!(
@@ -109,8 +104,6 @@ fn full_snapshot_to_delta_convergence() {
 fn large_world_snapshot_chunking() {
     let mut registry = ReplicationRegistry::new();
     registry.register::<Position>();
-    let registry = Arc::new(registry);
-
     let mut world = World::new();
     world.register_component::<Position>();
 
@@ -130,7 +123,7 @@ fn large_world_snapshot_chunking() {
     }
 
     // Small chunk limit forces multiple chunks
-    let builder = WorldSnapshotBuilder::new(Arc::clone(&registry)).with_chunk_limit(512);
+    let builder = WorldSnapshotBuilder::new(&registry).with_chunk_limit(512);
     let snapshot = builder.build(&world);
 
     assert_eq!(snapshot.total_components(), 100);
@@ -156,48 +149,54 @@ fn delta_tracker_multi_frame_consistency() {
     let mut registry = ReplicationRegistry::new();
     registry.register::<Position>();
     registry.register::<Velocity>();
-    let registry = Arc::new(registry);
-
     let mut world = World::new();
     world.register_component::<Position>();
     world.register_component::<Velocity>();
 
-    let mut tracker = DeltaTracker::new(Arc::clone(&registry));
+    let mut tracker = DeltaTracker::new();
 
     // Frame 1: spawn entities
     let e1 = world.spawn();
     let e2 = world.spawn();
     world
-        .insert(e1, Position {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        })
+        .insert(
+            e1,
+            Position {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        )
         .expect("insert");
     world
-        .insert(e2, Velocity {
-            dx: 1.0,
-            dy: 0.0,
-            dz: 0.0,
-        })
+        .insert(
+            e2,
+            Velocity {
+                dx: 1.0,
+                dy: 0.0,
+                dz: 0.0,
+            },
+        )
         .expect("insert");
 
-    let frame1 = tracker.diff(&world);
+    let frame1 = tracker.diff(&registry, &world);
     assert_eq!(frame1.diffs.len(), 2);
-    assert!(frame1.diffs.iter().all(|d| matches!(
-        d.payload,
-        DiffPayload::Insert { .. }
-    )));
+    assert!(
+        frame1
+            .diffs
+            .iter()
+            .all(|d| matches!(d.payload, DiffPayload::Insert { .. }))
+    );
 
     // Frame 2: no changes
-    let frame2 = tracker.diff(&world);
+    let frame2 = tracker.diff(&registry, &world);
     assert!(frame2.is_empty());
 
     // Frame 3: update one entity
     if let Some(pos) = world.get_mut::<Position>(e1) {
         pos.x = 5.0;
     }
-    let frame3 = tracker.diff(&world);
+    let frame3 = tracker.diff(&registry, &world);
     assert_eq!(frame3.diffs.len(), 1);
     assert!(matches!(
         frame3.diffs[0].payload,
@@ -206,13 +205,16 @@ fn delta_tracker_multi_frame_consistency() {
 
     // Frame 4: add component to existing entity
     world
-        .insert(e1, Velocity {
-            dx: 2.0,
-            dy: 0.0,
-            dz: 0.0,
-        })
+        .insert(
+            e1,
+            Velocity {
+                dx: 2.0,
+                dy: 0.0,
+                dz: 0.0,
+            },
+        )
         .expect("insert");
-    let frame4 = tracker.diff(&world);
+    let frame4 = tracker.diff(&registry, &world);
     assert_eq!(frame4.diffs.len(), 1);
     assert!(matches!(
         frame4.diffs[0].payload,
@@ -221,7 +223,7 @@ fn delta_tracker_multi_frame_consistency() {
 
     // Frame 5: despawn entity
     world.despawn(e2).expect("despawn");
-    let frame5 = tracker.diff(&world);
+    let frame5 = tracker.diff(&registry, &world);
     assert_eq!(frame5.diffs.len(), 1);
     assert!(matches!(frame5.diffs[0].payload, DiffPayload::Remove));
 }

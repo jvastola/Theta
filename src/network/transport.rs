@@ -1164,9 +1164,9 @@ mod tests {
             Endpoint::server(server_cfg, "127.0.0.1:0".parse().unwrap()).expect("server endpoint");
         let server_addr = server_endpoint.local_addr().expect("server addr");
 
-    let payload_pattern = 0xACu8;
+        let payload_pattern = 0xACu8;
 
-    let server_task = tokio::spawn(async move {
+        let server_task = tokio::spawn(async move {
             if let Some(connecting) = server_endpoint.accept().await {
                 if let Ok(mut session) = accept(
                     connecting,
