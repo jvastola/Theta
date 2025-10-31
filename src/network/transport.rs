@@ -1,10 +1,11 @@
 #![cfg(feature = "network-quic")]
 
 use super::{TransportDiagnostics, current_time_millis};
+use crate::network::command_log::CommandPacket;
 use crate::network::wire;
 use ed25519_dalek::SigningKey;
 use flatbuffers::{FlatBufferBuilder, UnionWIPOffset, WIPOffset};
-use quinn::{self, Connection, ReadExactError, RecvStream, SendStream};
+use quinn::{self, Connection, ReadExactError, ReadToEndError, RecvStream, SendStream};
 use rand::{RngCore, rngs::OsRng};
 use std::convert::TryInto;
 use std::net::SocketAddr;
@@ -26,6 +27,7 @@ use wire::theta::net::{
 
 const FRAME_HEADER_LEN: usize = 4;
 const HANDSHAKE_CAPACITY: usize = 1024;
+const FRAME_KIND_COMMAND_PACKET: u8 = 1;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -45,6 +47,54 @@ pub enum TransportError {
     Timeout(String),
     #[error("flatbuffer decode error: {0}")]
     Flatbuffers(String),
+    #[error("protocol error: {0}")]
+    Protocol(String),
+    #[error("serialization error: {0}")]
+    Serialization(String),
+    #[error("quinn read_to_end error: {0}")]
+    ReadToEnd(#[from] ReadToEndError),
+}
+
+struct FramedStream {
+    send: Arc<TokioMutex<SendStream>>,
+    recv: Arc<TokioMutex<RecvStream>>,
+}
+
+impl FramedStream {
+    fn new(send: SendStream, recv: RecvStream) -> Self {
+        Self {
+            send: Arc::new(TokioMutex::new(send)),
+            recv: Arc::new(TokioMutex::new(recv)),
+        }
+    }
+
+    async fn write_frame(&self, payload: &[u8]) -> Result<(), TransportError> {
+        let mut guard = self.send.lock().await;
+        write_frame_raw(&mut guard, payload).await
+    }
+
+    async fn read_frame(&self, timeout: Duration) -> Result<Vec<u8>, TransportError> {
+        let mut guard = self.recv.lock().await;
+        read_frame_raw(&mut guard, timeout).await
+    }
+
+    async fn write_all(&self, payload: &[u8]) -> Result<(), TransportError> {
+        let mut guard = self.send.lock().await;
+        guard.write_all(payload).await?;
+        Ok(())
+    }
+
+    async fn finish_send(&self) -> Result<(), TransportError> {
+        let mut guard = self.send.lock().await;
+        guard.finish().await?;
+        Ok(())
+    }
+
+    async fn read_to_end(&self, limit: usize) -> Result<Vec<u8>, TransportError> {
+        let mut guard = self.recv.lock().await;
+        let bytes = guard.read_to_end(limit).await?;
+        Ok(bytes.to_vec())
+    }
 }
 
 #[derive(Clone)]
@@ -130,17 +180,11 @@ pub struct HandshakeSummary {
 }
 
 #[allow(dead_code)]
-struct BiChannel {
-    send: SendStream,
-    recv: RecvStream,
-}
-
-#[allow(dead_code)]
 pub struct TransportSession {
     connection: Connection,
     control_send: Arc<TokioMutex<SendStream>>,
-    replication: BiChannel,
-    assets: BiChannel,
+    replication: FramedStream,
+    assets: FramedStream,
     metrics: TransportMetricsHandle,
     heartbeat: HeartbeatActor,
     handshake: HandshakeSummary,
@@ -153,6 +197,55 @@ impl TransportSession {
 
     pub fn handshake(&self) -> &HandshakeSummary {
         &self.handshake
+    }
+
+    pub async fn send_command_packets(
+        &self,
+        packets: &[CommandPacket],
+    ) -> Result<(), TransportError> {
+        if packets.is_empty() {
+            return Ok(());
+        }
+
+        for packet in packets {
+            let frame = encode_command_packet_frame(packet)?;
+            self.replication.write_frame(&frame).await?;
+        }
+
+        let sent = packets.len() as u64;
+        self.metrics.update(|m| {
+            m.packets_sent = m.packets_sent.saturating_add(sent);
+            if sent > 0 {
+                m.compression_ratio = 1.0;
+            }
+        });
+
+        Ok(())
+    }
+
+    pub async fn receive_command_packet(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<CommandPacket>, TransportError> {
+        loop {
+            let frame = match self.replication.read_frame(timeout).await {
+                Ok(bytes) => bytes,
+                Err(TransportError::Timeout(_)) => return Ok(None),
+                Err(err) => return Err(err),
+            };
+
+            match decode_command_packet_frame(&frame) {
+                Ok(Some(packet)) => {
+                    self.metrics.update(|m| {
+                        m.packets_received = m.packets_received.saturating_add(1);
+                        m.compression_ratio = 1.0;
+                    });
+                    return Ok(Some(packet));
+                }
+                Ok(None) => return Ok(None),
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     pub async fn close(self) {
@@ -237,14 +330,8 @@ async fn establish_client_session(
     Ok(TransportSession {
         connection,
         control_send: control_send_arc,
-        replication: BiChannel {
-            send: replication.0,
-            recv: replication.1,
-        },
-        assets: BiChannel {
-            send: assets.0,
-            recv: assets.1,
-        },
+        replication: FramedStream::new(replication.0, replication.1),
+        assets: FramedStream::new(assets.0, assets.1),
         metrics,
         heartbeat,
         handshake: HandshakeSummary {
@@ -312,14 +399,8 @@ async fn establish_server_session(
     Ok(TransportSession {
         connection,
         control_send: control_send_arc,
-        replication: BiChannel {
-            send: replication.0,
-            recv: replication.1,
-        },
-        assets: BiChannel {
-            send: assets.0,
-            recv: assets.1,
-        },
+        replication: FramedStream::new(replication.0, replication.1),
+        assets: FramedStream::new(assets.0, assets.1),
         metrics,
         heartbeat,
         handshake: HandshakeSummary {
@@ -688,6 +769,32 @@ fn random_nonce() -> Vec<u8> {
     let mut nonce = vec![0u8; 24];
     OsRng.fill_bytes(&mut nonce);
     nonce
+}
+
+fn encode_command_packet_frame(packet: &CommandPacket) -> Result<Vec<u8>, TransportError> {
+    let mut payload =
+        serde_json::to_vec(packet).map_err(|err| TransportError::Serialization(err.to_string()))?;
+    let mut frame = Vec::with_capacity(1 + payload.len());
+    frame.push(FRAME_KIND_COMMAND_PACKET);
+    frame.append(&mut payload);
+    Ok(frame)
+}
+
+fn decode_command_packet_frame(bytes: &[u8]) -> Result<Option<CommandPacket>, TransportError> {
+    if bytes.is_empty() {
+        return Err(TransportError::Protocol(
+            "replication frame missing kind byte".into(),
+        ));
+    }
+
+    match bytes[0] {
+        FRAME_KIND_COMMAND_PACKET => {
+            let packet = serde_json::from_slice::<CommandPacket>(&bytes[1..])
+                .map_err(|err| TransportError::Serialization(err.to_string()))?;
+            Ok(Some(packet))
+        }
+        _ => Ok(None),
+    }
 }
 
 #[cfg(all(test, feature = "network-quic"))]
@@ -1168,7 +1275,7 @@ mod tests {
 
         let server_task = tokio::spawn(async move {
             if let Some(connecting) = server_endpoint.accept().await {
-                if let Ok(mut session) = accept(
+                if let Ok(session) = accept(
                     connecting,
                     ServerHandshake {
                         protocol_version: 1,
@@ -1182,7 +1289,6 @@ mod tests {
                 {
                     let received = session
                         .assets
-                        .recv
                         .read_to_end(PAYLOAD_SIZE + 1024)
                         .await
                         .expect("read payload");
@@ -1197,7 +1303,7 @@ mod tests {
         client_cfg.transport_config(transport);
         let client_endpoint = client_endpoint(client_cfg);
 
-        let mut client_session = connect(
+        let client_session = connect(
             &client_endpoint,
             server_addr,
             ClientHandshake {
@@ -1219,16 +1325,125 @@ mod tests {
         let payload = vec![payload_pattern; PAYLOAD_SIZE];
         client_session
             .assets
-            .send
             .write_all(&payload)
             .await
             .expect("write payload");
         client_session
             .assets
-            .send
-            .finish()
+            .finish_send()
             .await
             .expect("finish payload stream");
+
+        client_session.close().await;
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn command_packets_roundtrip_over_replication_stream() {
+        use crate::network::command_log::{
+            AuthorId, CommandAuthor, CommandBatch, CommandEntry, CommandId, CommandPayload,
+            CommandRole, CommandScope, ConflictStrategy,
+        };
+
+        let cert_key = build_certified_key();
+        let transport = Arc::new(quinn::TransportConfig::default());
+        let heartbeat_cfg = HeartbeatConfig {
+            interval: Duration::from_millis(200),
+            timeout: Duration::from_secs(1),
+        };
+
+        let mut server_cfg = server_config(&cert_key);
+        server_cfg.transport_config(transport.clone());
+        let server_endpoint =
+            Endpoint::server(server_cfg, "127.0.0.1:0".parse().unwrap()).expect("server endpoint");
+        let server_addr = server_endpoint.local_addr().expect("server addr");
+
+        let server_signing_key = SigningKey::generate(&mut OsRng);
+
+        let server_task = tokio::spawn(async move {
+            if let Some(connecting) = server_endpoint.accept().await {
+                if let Ok(session) = accept(
+                    connecting,
+                    ServerHandshake {
+                        protocol_version: 1,
+                        schema_hash: 0xABCDu64,
+                        capabilities: vec![1, 2, 3],
+                        signing_key: server_signing_key,
+                        heartbeat: heartbeat_cfg,
+                    },
+                )
+                .await
+                {
+                    let packet = session
+                        .receive_command_packet(Duration::from_secs(1))
+                        .await
+                        .expect("receive command packet")
+                        .expect("command packet present");
+
+                    assert_eq!(packet.sequence, 42);
+                    let batch = packet.decode().expect("decode command batch");
+                    assert_eq!(batch.entries.len(), 1);
+                    let entry = &batch.entries[0];
+                    assert_eq!(entry.payload.command_type, "test.command");
+                    assert_eq!(entry.strategy, ConflictStrategy::LastWriteWins);
+
+                    session.close().await;
+                }
+            }
+        });
+
+        let mut client_cfg = client_config(&cert_key);
+        client_cfg.transport_config(transport);
+        let client_endpoint = client_endpoint(client_cfg);
+
+        let client_signing_key = SigningKey::generate(&mut OsRng);
+
+        let client_session = connect(
+            &client_endpoint,
+            server_addr,
+            ClientHandshake {
+                protocol_version: 1,
+                schema_hash: 0xABCDu64,
+                capabilities: vec![1, 2, 3],
+                auth_token: None,
+                signing_key: client_signing_key,
+                heartbeat: HeartbeatConfig {
+                    interval: Duration::from_millis(200),
+                    timeout: Duration::from_secs(1),
+                },
+                server_name: "localhost".into(),
+            },
+        )
+        .await
+        .expect("client handshake");
+
+        let author = CommandAuthor::new(AuthorId(7), CommandRole::Editor);
+        let payload = CommandPayload::new("test.command", CommandScope::Global, vec![1, 2, 3, 4]);
+        let entry = CommandEntry::new(
+            CommandId::new(9, AuthorId(7)),
+            1_234,
+            payload,
+            ConflictStrategy::LastWriteWins,
+            author,
+            None,
+        );
+        let batch = CommandBatch {
+            sequence: 42,
+            timestamp_ms: 5_678,
+            entries: vec![entry],
+        };
+        let packet = CommandPacket::from_batch(&batch).expect("serialize command batch");
+
+        client_session
+            .send_command_packets(std::slice::from_ref(&packet))
+            .await
+            .expect("send command packet");
+
+        let metrics = client_session
+            .metrics_handle()
+            .latest()
+            .expect("metrics snapshot");
+        assert!(metrics.packets_sent >= 2);
 
         client_session.close().await;
         let _ = server_task.await;

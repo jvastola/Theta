@@ -601,13 +601,11 @@ impl SignatureVerifier for Ed25519SignatureVerifier {
             None => return false,
         };
 
-        let signature = match Signature::from_bytes(&signature_bytes) {
-            Ok(sig) => sig,
-            Err(_) => return false,
-        };
-
         let message = signing_message(lamport, payload);
-        verifying_key.verify(&message, &signature).is_ok()
+        match Signature::try_from(signature_bytes.as_slice()) {
+            Ok(sig) => verifying_key.verify(&message, &sig).is_ok(),
+            Err(_) => false,
+        }
     }
 }
 

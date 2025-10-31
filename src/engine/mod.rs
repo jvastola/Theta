@@ -5,8 +5,8 @@ use self::commands::CommandPipeline;
 use crate::ecs::World;
 use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
 use crate::editor::{CommandOutbox, CommandTransportQueue};
-use crate::network::command_log::{CommandBatch, CommandPacket};
 use crate::network::EntityHandle;
+use crate::network::command_log::{CommandBatch, CommandPacket};
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
 #[cfg(feature = "vr-openxr")]
 use crate::vr::openxr::OpenXrInputProvider;
