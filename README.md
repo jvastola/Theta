@@ -23,11 +23,21 @@ Codex is a Rust-native VR-first game engine concept focused on high-performance 
 
 Each subsystem will be designed as a distinct module crate to allow modular development and unit testing. Bevy and other ecosystem crates may be leveraged selectively where they accelerate development without constraining the custom architecture.
 
+## Current Status
+- Stage-aware scheduler runs `Startup → Simulation → Render → Editor`, profiles each stage/system, and flags read-only policy violations.
+- ECS demo world simulates actor motion, editor selection state, and captures VR input samples (head + controllers).
+- Renderer ships with a null backend plus a feature-gated `wgpu` backend that reuses per-eye swapchain textures and forwards GPU submissions to the VR bridge.
+- VR layer provides a simulated input provider by default, with a feature-gated OpenXR provider (`vr-openxr`) that loads the runtime when available.
+
 ## Immediate Roadmap
-1. Land swapchain/presentation plumbing in the `wgpu` backend (per-eye surfaces mapped to VR compositor expectations).
-2. Integrate OpenXR (or mock runtime) input paths to feed tracked poses/components into the ECS.
+1. Connect `wgpu` swapchain images into OpenXR session swapchains for real headset presentation.
+2. Promote OpenXR input provider from simulated passthrough to live action polling and tracked pose updates.
 3. Stand up multiplayer skeleton (async runtime, networking service, replication events).
 4. Flesh out mesh editing domain model with undo/redo stacks and serialization.
+
+## Feature Flags
+- `render-wgpu`: enables the `wgpu` backend and GPU submission plumbing.
+- `vr-openxr`: enables the OpenXR input provider (falls back to simulated input if the runtime cannot be loaded).
 
 ## Development Notes
 - Target Rust 2024 edition.

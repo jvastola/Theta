@@ -2,6 +2,8 @@
 use crate::vr::{GpuFrameSubmission, GpuSurface};
 use crate::vr::{SurfaceHandle, VrBridge, VrError, VrFrameSubmission, VrViewConfig};
 use std::fmt;
+#[cfg(feature = "render-wgpu")]
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
@@ -47,6 +49,13 @@ pub struct RenderSubmission {
     pub gpu_submission: Option<GpuFrameSubmission>,
 }
 
+#[cfg(feature = "render-wgpu")]
+#[derive(Clone)]
+pub struct WgpuContext {
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
+}
+
 #[derive(Debug)]
 pub enum RenderError {
     Vr(VrError),
@@ -84,6 +93,11 @@ pub trait GpuBackend: Send {
         inputs: &FrameInputs,
         views: &VrViewConfig,
     ) -> RenderResult<RenderSubmission>;
+
+    #[cfg(feature = "render-wgpu")]
+    fn wgpu_context(&self) -> Option<WgpuContext> {
+        None
+    }
 }
 
 pub struct Renderer {
@@ -211,21 +225,30 @@ impl GpuBackend for NullGpuBackend {
             gpu_submission: None,
         })
     }
+
+    #[cfg(feature = "render-wgpu")]
+    fn wgpu_context(&self) -> Option<WgpuContext> {
+        None
+    }
 }
 
 #[cfg(feature = "render-wgpu")]
 pub mod wgpu_backend {
     use super::*;
     use pollster::block_on;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     pub struct WgpuBackend {
         _instance: wgpu::Instance,
         _adapter: wgpu::Adapter,
-        device: wgpu::Device,
-        queue: wgpu::Queue,
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        swapchains: Vec<EyeSwapchain>,
     }
 
     const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+    const EYE_BUFFER_COUNT: usize = 3;
 
     impl WgpuBackend {
         pub fn initialize() -> RenderResult<Self> {
@@ -257,11 +280,15 @@ pub mod wgpu_backend {
                 .await
                 .map_err(|_| RenderError::Backend("failed to create wgpu device"))?;
 
+            let device = Arc::new(device);
+            let queue = Arc::new(queue);
+
             Ok(Self {
                 _instance: instance,
                 _adapter: adapter,
                 device,
                 queue,
+                swapchains: Vec::new(),
             })
         }
     }
@@ -282,36 +309,29 @@ pub mod wgpu_backend {
                     label: Some("Codex Frame Encoder"),
                 });
 
+            if self.swapchains.len() < views.view_count() {
+                let current_len = self.swapchains.len();
+                self.swapchains
+                    .extend((current_len..views.view_count()).map(EyeSwapchain::new));
+            }
+
             let mut gpu_surfaces = Vec::with_capacity(views.view_count());
             let mut handles = Vec::with_capacity(views.view_count());
 
             for (eye, view) in views.views.iter().enumerate() {
-                let extent = wgpu::Extent3d {
-                    width: view.resolution[0].max(1),
-                    height: view.resolution[1].max(1),
-                    depth_or_array_layers: 1,
-                };
-
-                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Codex Eye Frame"),
-                    size: extent,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: COLOR_FORMAT,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::COPY_SRC
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                });
-
-                let view_handle = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let swapchain = &mut self.swapchains[eye];
+                let AcquiredImage {
+                    handle,
+                    texture,
+                    view,
+                    release,
+                } = swapchain.acquire(&self.device, view.resolution, COLOR_FORMAT);
 
                 {
                     let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Codex Clear Pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view_handle,
+                            view: &view,
                             resolve_target: None,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -328,14 +348,8 @@ pub mod wgpu_backend {
                         occlusion_query_set: None,
                     });
                 }
-
-                let handle = SurfaceHandle {
-                    id: eye as u64,
-                    size: view.resolution,
-                };
-
                 handles.push(handle);
-                gpu_surfaces.push(GpuSurface::new(handle, texture, view_handle));
+                gpu_surfaces.push(GpuSurface::with_release(handle, texture, view, release));
             }
 
             self.queue.submit(std::iter::once(encoder.finish()));
@@ -348,6 +362,124 @@ pub mod wgpu_backend {
                 }),
             })
         }
+
+        fn wgpu_context(&self) -> Option<WgpuContext> {
+            Some(WgpuContext {
+                device: Arc::clone(&self.device),
+                queue: Arc::clone(&self.queue),
+            })
+        }
+    }
+
+    struct SwapchainSlot {
+        texture: Arc<wgpu::Texture>,
+        fence: Arc<AtomicBool>,
+    }
+
+    struct EyeSwapchain {
+        eye_index: usize,
+        size: [u32; 2],
+        slots: Vec<SwapchainSlot>,
+        cursor: usize,
+    }
+
+    impl EyeSwapchain {
+        fn new(eye_index: usize) -> Self {
+            Self {
+                eye_index,
+                size: [0, 0],
+                slots: Vec::new(),
+                cursor: 0,
+            }
+        }
+
+        fn acquire(
+            &mut self,
+            device: &wgpu::Device,
+            size: [u32; 2],
+            format: wgpu::TextureFormat,
+        ) -> AcquiredImage {
+            if self.size != size || self.slots.is_empty() {
+                self.resize(device, size, format);
+            }
+
+            let slot_index = self.next_available_slot();
+            let slot = &self.slots[slot_index];
+
+            if !slot.fence.swap(false, Ordering::AcqRel) {
+                // No free image; fall back to current slot and warn.
+                eprintln!(
+                    "[render] eye {} exhausted swapchain images; reusing in-flight image",
+                    self.eye_index
+                );
+            }
+
+            self.cursor = (slot_index + 1) % self.slots.len();
+
+            let texture = Arc::clone(&slot.texture);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            AcquiredImage {
+                handle: SurfaceHandle {
+                    id: self.eye_index as u64,
+                    size,
+                },
+                texture,
+                view,
+                release: slot.fence.clone(),
+            }
+        }
+
+        fn resize(&mut self, device: &wgpu::Device, size: [u32; 2], format: wgpu::TextureFormat) {
+            self.size = size;
+            self.slots = (0..EYE_BUFFER_COUNT)
+                .map(|_| {
+                    let extent = wgpu::Extent3d {
+                        width: size[0].max(1),
+                        height: size[1].max(1),
+                        depth_or_array_layers: 1,
+                    };
+
+                    let texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Codex Eye Swapchain Image"),
+                        size: extent,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::COPY_SRC
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    }));
+                    SwapchainSlot {
+                        texture,
+                        fence: Arc::new(AtomicBool::new(true)),
+                    }
+                })
+                .collect();
+            self.cursor = 0;
+        }
+
+        fn next_available_slot(&mut self) -> usize {
+            let slot_count = self.slots.len().max(1);
+            for offset in 0..slot_count {
+                let index = (self.cursor + offset) % slot_count;
+                let fence = &self.slots[index].fence;
+                if fence.load(Ordering::Acquire) {
+                    return index;
+                }
+            }
+            // If none are available, reuse current cursor.
+            self.cursor % slot_count
+        }
+    }
+
+    struct AcquiredImage {
+        handle: SurfaceHandle,
+        texture: Arc<wgpu::Texture>,
+        view: wgpu::TextureView,
+        release: Arc<AtomicBool>,
     }
 }
 

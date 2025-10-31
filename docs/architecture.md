@@ -33,7 +33,8 @@ Define the foundational architecture for the Codex VR-first game engine and edit
 - `engine::schedule` hosts the ECS `World` and drives registered systems each frame.
 - Systems can be registered as structs or closure-based adapters, enabling game/editor layers to plug in at runtime.
 - Stage-aware execution (`Startup → Simulation → Render → Editor`) batches exclusive systems per stage, while read-only jobs fan out in parallel using Rayon.
-- Core telemetry (e.g., frame counters) lives in ECS so tooling can observe/replicate it over the network layer.
+- Per-stage profiling captures sequential/parallel timings, records slow system warnings, and flags read-only policy violations so tooling can react in-editor.
+- Core telemetry (e.g., frame counters, stage durations, controller state) lives in ECS so runtime/editor layers and network replication can observe it uniformly.
 
 ## ECS Design
 - **Entities:** Dense integer handles backed by generational indices to avoid ABA issues.
@@ -48,11 +49,11 @@ Define the foundational architecture for the Codex VR-first game engine and edit
 - **Stereo Pipeline:** Each frame renders left/right views with shared resource caches, foveated rendering compatibility, and timewarp/spacewarp hooks.
 - **Mesh Authoring Integration:** Editor edits operate on GPU-friendly mesh buffers. Command stack updates CPU and GPU caches atomically.
 - **Performance Goals:** Maintain 90 Hz at target headset resolution with GPU profiling hooks exposed to the editor.
-- **Implementation Note:** Optional `render-wgpu` feature boots a `wgpu` backend that renders per-eye attachments, wraps them into VR GPU submissions, and validates device/queue plumbing ahead of swapchain presentation work.
+- **Implementation Note:** Optional `render-wgpu` feature boots a `wgpu` backend that renders into persistent per-eye swapchain images, reusing textures via in-flight fences and emitting GPU submissions for the VR compositor.
 
 ## VR Integration
-- **OpenXR Runtime:** Session creation, reference space management, action sets for controllers, and event polling.
-- **Input Abstraction:** Map tracked poses, button states, and analog values into ECS components (e.g., `VrHand`, `VrPose`).
+- **OpenXR Runtime:** Session creation, reference space management, action sets for controllers, and event polling. A feature-gated `vr-openxr` module now loads the runtime when available, falling back to a simulated provider otherwise.
+- **Input Abstraction:** Map tracked poses, button states, and analog values into ECS components (e.g., `TrackedPose`, `ControllerState`). Simulation provider supplies wobble/trigger waveforms so systems can be exercised without hardware.
 - **Haptics:** Provide command buffer for vibration patterns tied to editor actions (snap confirmation, surface contact).
 - **Safety Layer:** Guardian boundary visualization and comfort settings (snap turning, vignette).
 
@@ -99,7 +100,7 @@ Define the foundational architecture for the Codex VR-first game engine and edit
 - Security model for collaborative editing beyond trusted peers.
 
 ## Next Steps
-- Instrument the staged scheduler with profiling hooks and world access diagnostics to guide future task graph work.
-- Extend the `wgpu` backend toward swapchain/presentation surfaces (per-eye) now that GPU submissions bridge into the VR layer.
-- Spike OpenXR integration path with feature-gated dependencies.
+- Drive `wgpu` integration toward headset compositor presentation (OpenXR swapchains), building atop the new per-eye texture reuse and GPU submission plumbing.
+- Promote the OpenXR provider from simulation passthrough to real action set polling and tracked pose updates, keeping the simulated fallback for desktop iteration.
+- Extend scheduler profiling with aggregation/export so editor overlays can visualize stage timings and surface read-only violations.
 - Draft networking protocol schema (Protobuf/FlatBuffers) for entity/component replication.

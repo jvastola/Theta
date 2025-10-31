@@ -1,5 +1,13 @@
 use std::fmt;
 
+#[cfg(feature = "vr-openxr")]
+pub mod openxr;
+
+#[cfg(feature = "render-wgpu")]
+use std::sync::Arc;
+#[cfg(feature = "render-wgpu")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
 #[derive(Debug, Clone, Copy)]
 pub struct VrView {
     pub resolution: [u32; 2],
@@ -79,6 +87,66 @@ pub trait VrBridge: Send {
             surfaces: submission.handles(),
         };
         self.present(fallback)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TrackedPose {
+    pub position: [f32; 3],
+    pub orientation: [f32; 4],
+}
+
+impl Default for TrackedPose {
+    fn default() -> Self {
+        Self {
+            position: [0.0, 0.0, 0.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ControllerState {
+    pub pose: TrackedPose,
+    pub trigger: f32,
+    pub grip: f32,
+    pub buttons: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VrInputSample {
+    pub head: TrackedPose,
+    pub left: ControllerState,
+    pub right: ControllerState,
+}
+
+pub trait VrInputProvider: Send {
+    fn label(&self) -> &'static str;
+    fn sample(&mut self, delta_seconds: f32) -> VrInputSample;
+}
+
+#[derive(Default)]
+pub struct SimulatedInputProvider {
+    elapsed: f32,
+}
+
+impl VrInputProvider for SimulatedInputProvider {
+    fn label(&self) -> &'static str {
+        "Simulated VR Input"
+    }
+
+    fn sample(&mut self, delta_seconds: f32) -> VrInputSample {
+        self.elapsed += delta_seconds;
+        let wobble = (self.elapsed * 0.5).sin() * 0.1;
+        let forward = (self.elapsed * 0.75).cos() * 0.05;
+
+        let mut sample = VrInputSample::default();
+        sample.head.position = [wobble, 1.6 + forward, 0.0];
+        sample.left.pose.position = [-0.25 + wobble * 0.5, 1.4, 0.2 + forward];
+        sample.right.pose.position = [0.25 + wobble * 0.5, 1.4, 0.2 - forward];
+        sample.left.trigger = ((self.elapsed * 0.7).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+        sample.right.trigger = ((self.elapsed * 0.9).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+        sample
     }
 }
 
@@ -169,8 +237,9 @@ fn identity_matrix() -> [[f32; 4]; 4] {
 #[derive(Debug)]
 pub struct GpuSurface {
     pub handle: SurfaceHandle,
-    pub texture: wgpu::Texture,
+    pub texture: Arc<wgpu::Texture>,
     pub view: wgpu::TextureView,
+    release: Option<Arc<AtomicBool>>,
 }
 
 #[cfg(feature = "render-wgpu")]
@@ -178,8 +247,32 @@ impl GpuSurface {
     pub fn new(handle: SurfaceHandle, texture: wgpu::Texture, view: wgpu::TextureView) -> Self {
         Self {
             handle,
+            texture: Arc::new(texture),
+            view,
+            release: None,
+        }
+    }
+
+    pub(crate) fn with_release(
+        handle: SurfaceHandle,
+        texture: Arc<wgpu::Texture>,
+        view: wgpu::TextureView,
+        release: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            handle,
             texture,
             view,
+            release: Some(release),
+        }
+    }
+}
+
+#[cfg(feature = "render-wgpu")]
+impl Drop for GpuSurface {
+    fn drop(&mut self) {
+        if let Some(flag) = self.release.take() {
+            flag.store(true, Ordering::Release);
         }
     }
 }

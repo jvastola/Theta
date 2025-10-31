@@ -2,8 +2,13 @@ pub mod schedule;
 
 use crate::ecs::World;
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
-use crate::vr::{NullVrBridge, VrBridge};
+#[cfg(feature = "vr-openxr")]
+use crate::vr::openxr::OpenXrInputProvider;
+use crate::vr::{
+    ControllerState, NullVrBridge, SimulatedInputProvider, TrackedPose, VrBridge, VrInputProvider,
+};
 use schedule::{Scheduler, Stage, System};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 const DEFAULT_MAX_FRAMES: u32 = 3;
@@ -13,6 +18,8 @@ pub struct Engine {
     renderer: Renderer,
     target_frame_time: f32,
     max_frames: u32,
+    frame_stats_entity: Option<crate::ecs::Entity>,
+    input_provider: Arc<Mutex<Box<dyn VrInputProvider>>>,
 }
 
 impl Engine {
@@ -27,12 +34,15 @@ impl Engine {
     pub fn with_renderer_config(config: RendererConfig) -> Self {
         let scheduler = Scheduler::default();
         let renderer = Self::build_renderer(config);
+        let input_provider = build_input_provider();
 
         let mut engine = Self {
             scheduler,
             renderer,
             target_frame_time: 1.0 / 60.0,
             max_frames: DEFAULT_MAX_FRAMES,
+            frame_stats_entity: None,
+            input_provider,
         };
 
         engine.register_core_systems();
@@ -83,6 +93,7 @@ impl Engine {
             last_frame = now;
 
             self.scheduler.tick(delta_seconds);
+            self.update_frame_diagnostics();
 
             if let Err(err) = self.renderer.render(delta_seconds) {
                 eprintln!("[engine] render error: {err}");
@@ -105,11 +116,29 @@ impl Engine {
             world.register_component::<Transform>();
             world.register_component::<Velocity>();
             world.register_component::<EditorSelection>();
+            world.register_component::<TrackedPose>();
+            world.register_component::<ControllerState>();
         }
 
         let stats_entity = {
             let world = self.scheduler.world_mut();
             initialize_frame_stats(world)
+        };
+        self.frame_stats_entity = Some(stats_entity);
+
+        let head_entity = {
+            let world = self.scheduler.world_mut();
+            initialize_head_pose(world)
+        };
+
+        let left_controller_entity = {
+            let world = self.scheduler.world_mut();
+            initialize_controller(world, true)
+        };
+
+        let right_controller_entity = {
+            let world = self.scheduler.world_mut();
+            initialize_controller(world, false)
         };
 
         let actor_entity = {
@@ -121,6 +150,28 @@ impl Engine {
             let world = self.scheduler.world_mut();
             initialize_editor_state(world, actor_entity)
         };
+
+        let input_source = Arc::clone(&self.input_provider);
+        self.add_system_fn(Stage::Simulation, "update_vr_input", move |world, delta| {
+            let sample = {
+                let mut provider = input_source
+                    .lock()
+                    .expect("vr input provider mutex should not poison");
+                provider.sample(delta)
+            };
+
+            if let Some(pose) = world.get_mut::<TrackedPose>(head_entity) {
+                *pose = sample.head;
+            }
+
+            if let Some(state) = world.get_mut::<ControllerState>(left_controller_entity) {
+                *state = sample.left;
+            }
+
+            if let Some(state) = world.get_mut::<ControllerState>(right_controller_entity) {
+                *state = sample.right;
+            }
+        });
 
         self.add_system_fn(
             Stage::Simulation,
@@ -139,6 +190,14 @@ impl Engine {
             let actor_position = world
                 .get::<Transform>(actor_entity)
                 .map(|transform| transform.position);
+            let left_trigger = world
+                .get::<ControllerState>(left_controller_entity)
+                .map(|state| state.trigger)
+                .unwrap_or_default();
+            let right_trigger = world
+                .get::<ControllerState>(right_controller_entity)
+                .map(|state| state.trigger)
+                .unwrap_or_default();
             if let Some(stats) = world.get_mut::<FrameStats>(stats_entity) {
                 stats.frames += 1;
                 stats.total_time += delta;
@@ -148,10 +207,32 @@ impl Engine {
                     stats.last_actor_position = position;
                 }
 
+                stats.controller_trigger[0] = left_trigger;
+                stats.controller_trigger[1] = right_trigger;
+
                 println!(
-                    "[engine] frame {} avg {:.4}s pos {:?}",
-                    stats.frames, stats.average_frame_time, stats.last_actor_position
+                    "[engine] frame {} avg {:.4}s pos {:?} L:{:.2} R:{:.2}",
+                    stats.frames,
+                    stats.average_frame_time,
+                    stats.last_actor_position,
+                    stats.controller_trigger[0],
+                    stats.controller_trigger[1]
                 );
+                println!(
+                    "           stage timings ms {:?} (parallel {:?})",
+                    stats.stage_durations_ms, stats.stage_parallel_ms
+                );
+                for (stage, &violation) in Stage::ordered()
+                    .iter()
+                    .zip(stats.stage_read_only_violation.iter())
+                {
+                    if violation {
+                        println!(
+                            "           warning: {:?} stage executed exclusive systems",
+                            stage
+                        );
+                    }
+                }
             }
         });
 
@@ -220,6 +301,10 @@ struct FrameStats {
     total_time: f32,
     average_frame_time: f32,
     last_actor_position: [f32; 3],
+    stage_durations_ms: [f32; Stage::count()],
+    stage_parallel_ms: [f32; Stage::count()],
+    stage_read_only_violation: [bool; Stage::count()],
+    controller_trigger: [f32; 2],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -283,6 +368,28 @@ fn initialize_frame_stats(world: &mut World) -> crate::ecs::Entity {
     entity
 }
 
+fn initialize_head_pose(world: &mut World) -> crate::ecs::Entity {
+    let entity = world.spawn();
+    world
+        .insert(entity, TrackedPose::default())
+        .expect("head pose component");
+    entity
+}
+
+fn initialize_controller(world: &mut World, left: bool) -> crate::ecs::Entity {
+    let entity = world.spawn();
+    let mut state = ControllerState::default();
+    if left {
+        state.pose.position = [-0.25, 1.4, 0.3];
+    } else {
+        state.pose.position = [0.25, 1.4, 0.3];
+    }
+    world
+        .insert(entity, state)
+        .expect("controller state component");
+    entity
+}
+
 fn initialize_actor(world: &mut World) -> crate::ecs::Entity {
     let entity = world.spawn();
     world
@@ -307,5 +414,48 @@ fn initialize_editor_state(world: &mut World, primary: crate::ecs::Entity) -> cr
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn build_input_provider() -> Arc<Mutex<Box<dyn VrInputProvider>>> {
+    #[cfg(feature = "vr-openxr")]
+    {
+        match OpenXrInputProvider::initialize() {
+            Ok(provider) => {
+                println!("[engine] OpenXR input provider initialized");
+                return Arc::new(Mutex::new(Box::new(provider) as Box<dyn VrInputProvider>));
+            }
+            Err(err) => {
+                eprintln!("[engine] OpenXR input unavailable; falling back to simulation: {err}");
+            }
+        }
+    }
+
+    Arc::new(Mutex::new(
+        Box::new(SimulatedInputProvider::default()) as Box<dyn VrInputProvider>
+    ))
+}
+
+impl Engine {
+    fn update_frame_diagnostics(&mut self) {
+        let Some(stats_entity) = self.frame_stats_entity else {
+            return;
+        };
+
+        let profile = self.scheduler.last_profile().clone();
+        if let Some(stats) = self
+            .scheduler
+            .world_mut()
+            .get_mut::<FrameStats>(stats_entity)
+        {
+            for stage in Stage::ordered() {
+                let index = stage.index();
+                if let Some(stage_profile) = profile.stage(stage) {
+                    stats.stage_durations_ms[index] = stage_profile.total_ms();
+                    stats.stage_parallel_ms[index] = stage_profile.parallel_ms();
+                    stats.stage_read_only_violation[index] = stage_profile.read_only_violation;
+                }
+            }
+        }
     }
 }
