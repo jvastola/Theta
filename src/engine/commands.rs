@@ -4,6 +4,8 @@ use crate::network::command_log::{
     CommandPacket, CommandPayload, CommandRegistry, CommandRole, CommandScope, CommandSigner,
     ConflictStrategy, NoopCommandSigner, NoopSignatureVerifier, SignatureVerifier,
 };
+#[cfg(feature = "network-quic")]
+use crate::network::transport::TransportSession;
 use crate::network::{EntityHandle, NetworkSession};
 use serde_json::to_vec;
 use std::sync::Arc;
@@ -86,6 +88,11 @@ impl CommandPipeline {
 
     pub fn replace_network_session(&mut self, session: NetworkSession) {
         self.session = session;
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn attach_transport_session(&mut self, session: &TransportSession) {
+        self.session.attach_transport_session(session);
     }
 }
 

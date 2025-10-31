@@ -7,6 +7,8 @@ use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySur
 use crate::editor::{CommandOutbox, CommandTransportQueue};
 use crate::network::EntityHandle;
 use crate::network::command_log::{CommandBatch, CommandPacket};
+#[cfg(feature = "network-quic")]
+use crate::network::transport::TransportSession;
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
 #[cfg(feature = "vr-openxr")]
 use crate::vr::openxr::OpenXrInputProvider;
@@ -17,6 +19,8 @@ use schedule::{Scheduler, Stage, System};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+#[cfg(feature = "network-quic")]
+use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 
 const DEFAULT_MAX_FRAMES: u32 = 3;
 
@@ -30,6 +34,10 @@ pub struct Engine {
     command_entity: Option<crate::ecs::Entity>,
     input_provider: Arc<Mutex<Box<dyn VrInputProvider>>>,
     command_pipeline: Arc<Mutex<CommandPipeline>>,
+    #[cfg(feature = "network-quic")]
+    transport_session: Option<TransportSession>,
+    #[cfg(feature = "network-quic")]
+    network_runtime: Option<TokioRuntime>,
 }
 
 impl Engine {
@@ -57,6 +65,10 @@ impl Engine {
             command_entity: None,
             input_provider,
             command_pipeline,
+            #[cfg(feature = "network-quic")]
+            transport_session: None,
+            #[cfg(feature = "network-quic")]
+            network_runtime: None,
         };
 
         engine.register_core_systems();
@@ -67,6 +79,24 @@ impl Engine {
         let mut config = RendererConfig::default();
         config.backend = backend;
         Self::with_renderer_config(config)
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn attach_transport_session(&mut self, session: TransportSession) {
+        if let Ok(mut pipeline) = self.command_pipeline.lock() {
+            pipeline.attach_transport_session(&session);
+        }
+
+        if self.network_runtime.is_none() {
+            self.network_runtime = Some(
+                TokioRuntimeBuilder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("create network runtime"),
+            );
+        }
+
+        self.transport_session = Some(session);
     }
 
     pub fn add_system<S>(&mut self, stage: Stage, name: &'static str, system: S)
@@ -626,10 +656,22 @@ impl Engine {
                     }
 
                     if !packets_to_queue.is_empty() {
+                        #[cfg(feature = "network-quic")]
+                        let mut pending_dispatch: Option<
+                            Vec<CommandPacket>,
+                        > = None;
+
                         {
                             let world = self.scheduler.world_mut();
                             if let Some(queue) = world.get_mut::<CommandTransportQueue>(entity) {
                                 queue.enqueue(packets_to_queue.iter().cloned());
+                                #[cfg(feature = "network-quic")]
+                                if self.transport_session.is_some() {
+                                    let drained = queue.drain_pending();
+                                    if !drained.is_empty() {
+                                        pending_dispatch = Some(drained);
+                                    }
+                                }
                             }
                         }
 
@@ -639,6 +681,45 @@ impl Engine {
                                 packet.sequence,
                                 packet.payload.len()
                             );
+                        }
+
+                        #[cfg(feature = "network-quic")]
+                        if let Some(packets_to_send) = pending_dispatch {
+                            if let Some(session) = self.transport_session.as_ref() {
+                                let send_result = {
+                                    let runtime = self.network_runtime.get_or_insert_with(|| {
+                                        TokioRuntimeBuilder::new_current_thread()
+                                            .enable_all()
+                                            .build()
+                                            .expect("create network runtime")
+                                    });
+                                    runtime.block_on(session.send_command_packets(&packets_to_send))
+                                };
+
+                                if let Err(err) = send_result {
+                                    log::error!(
+                                        "[commands] failed to transmit {} packets: {err}",
+                                        packets_to_send.len()
+                                    );
+                                    let world = self.scheduler.world_mut();
+                                    if let Some(queue) =
+                                        world.get_mut::<CommandTransportQueue>(entity)
+                                    {
+                                        queue.enqueue(packets_to_send.into_iter());
+                                    }
+                                } else {
+                                    log::debug!(
+                                        "[commands] transmitted {} queued packets via QUIC",
+                                        packets_to_send.len()
+                                    );
+                                }
+                            } else {
+                                let world = self.scheduler.world_mut();
+                                if let Some(queue) = world.get_mut::<CommandTransportQueue>(entity)
+                                {
+                                    queue.enqueue(packets_to_send.into_iter());
+                                }
+                            }
                         }
                     }
                 }

@@ -28,6 +28,7 @@ use wire::theta::net::{
 const FRAME_HEADER_LEN: usize = 4;
 const HANDSHAKE_CAPACITY: usize = 1024;
 const FRAME_KIND_COMMAND_PACKET: u8 = 1;
+const FRAME_KIND_COMPONENT_DELTA: u8 = 2;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -78,18 +79,21 @@ impl FramedStream {
         read_frame_raw(&mut guard, timeout).await
     }
 
+    #[allow(dead_code)]
     async fn write_all(&self, payload: &[u8]) -> Result<(), TransportError> {
         let mut guard = self.send.lock().await;
         guard.write_all(payload).await?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn finish_send(&self) -> Result<(), TransportError> {
         let mut guard = self.send.lock().await;
         guard.finish().await?;
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn read_to_end(&self, limit: usize) -> Result<Vec<u8>, TransportError> {
         let mut guard = self.recv.lock().await;
         let bytes = guard.read_to_end(limit).await?;
@@ -234,15 +238,29 @@ impl TransportSession {
                 Err(err) => return Err(err),
             };
 
-            match decode_command_packet_frame(&frame) {
-                Ok(Some(packet)) => {
+            match decode_replication_frame(&frame) {
+                Ok(DecodedReplicationFrame::Command(packet)) => {
                     self.metrics.update(|m| {
                         m.packets_received = m.packets_received.saturating_add(1);
                         m.compression_ratio = 1.0;
                     });
                     return Ok(Some(packet));
                 }
-                Ok(None) => return Ok(None),
+                Ok(DecodedReplicationFrame::ComponentDelta(bytes)) => {
+                    log::debug!(
+                        "[transport] received component delta ({} bytes) while awaiting command",
+                        bytes.len()
+                    );
+                    continue;
+                }
+                Ok(DecodedReplicationFrame::Unknown(kind, payload)) => {
+                    log::warn!(
+                        "[transport] ignoring unknown replication frame kind {} ({} bytes)",
+                        kind,
+                        payload.len()
+                    );
+                    continue;
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -771,29 +789,47 @@ fn random_nonce() -> Vec<u8> {
     nonce
 }
 
-fn encode_command_packet_frame(packet: &CommandPacket) -> Result<Vec<u8>, TransportError> {
-    let mut payload =
-        serde_json::to_vec(packet).map_err(|err| TransportError::Serialization(err.to_string()))?;
-    let mut frame = Vec::with_capacity(1 + payload.len());
-    frame.push(FRAME_KIND_COMMAND_PACKET);
-    frame.append(&mut payload);
-    Ok(frame)
+#[derive(Debug, PartialEq, Eq)]
+enum DecodedReplicationFrame {
+    Command(CommandPacket),
+    ComponentDelta(Vec<u8>),
+    Unknown(u8, Vec<u8>),
 }
 
-fn decode_command_packet_frame(bytes: &[u8]) -> Result<Option<CommandPacket>, TransportError> {
+fn encode_command_packet_frame(packet: &CommandPacket) -> Result<Vec<u8>, TransportError> {
+    let payload =
+        serde_json::to_vec(packet).map_err(|err| TransportError::Serialization(err.to_string()))?;
+    Ok(encode_framed_payload(FRAME_KIND_COMMAND_PACKET, payload))
+}
+
+#[cfg(test)]
+fn encode_component_delta_frame(bytes: &[u8]) -> Vec<u8> {
+    encode_framed_payload(FRAME_KIND_COMPONENT_DELTA, bytes.to_vec())
+}
+
+fn encode_framed_payload(kind: u8, payload: Vec<u8>) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(1 + payload.len());
+    frame.push(kind);
+    frame.extend_from_slice(&payload);
+    frame
+}
+
+fn decode_replication_frame(bytes: &[u8]) -> Result<DecodedReplicationFrame, TransportError> {
     if bytes.is_empty() {
         return Err(TransportError::Protocol(
             "replication frame missing kind byte".into(),
         ));
     }
 
+    let payload = bytes[1..].to_vec();
     match bytes[0] {
         FRAME_KIND_COMMAND_PACKET => {
-            let packet = serde_json::from_slice::<CommandPacket>(&bytes[1..])
+            let packet = serde_json::from_slice::<CommandPacket>(&payload)
                 .map_err(|err| TransportError::Serialization(err.to_string()))?;
-            Ok(Some(packet))
+            Ok(DecodedReplicationFrame::Command(packet))
         }
-        _ => Ok(None),
+        FRAME_KIND_COMPONENT_DELTA => Ok(DecodedReplicationFrame::ComponentDelta(payload)),
+        other => Ok(DecodedReplicationFrame::Unknown(other, payload)),
     }
 }
 
@@ -1434,6 +1470,15 @@ mod tests {
         };
         let packet = CommandPacket::from_batch(&batch).expect("serialize command batch");
 
+        let delta_marker = vec![0xAA, 0xBB, 0xCC];
+        let delta_frame = encode_component_delta_frame(&delta_marker);
+
+        client_session
+            .replication
+            .write_frame(&delta_frame)
+            .await
+            .expect("send delta frame");
+
         client_session
             .send_command_packets(std::slice::from_ref(&packet))
             .await
@@ -1447,6 +1492,26 @@ mod tests {
 
         client_session.close().await;
         let _ = server_task.await;
+    }
+
+    #[test]
+    fn replication_frame_decoding_classifies_component_delta() {
+        let payload = vec![1, 2, 3, 4];
+        let frame = encode_component_delta_frame(&payload);
+        match decode_replication_frame(&frame).expect("decode frame") {
+            DecodedReplicationFrame::ComponentDelta(bytes) => assert_eq!(bytes, payload),
+            other => panic!("unexpected frame variant: {other:?}"),
+        }
+
+        let mut unknown = vec![0xFE];
+        unknown.extend_from_slice(&payload);
+        match decode_replication_frame(&unknown).expect("decode unknown frame") {
+            DecodedReplicationFrame::Unknown(kind, bytes) => {
+                assert_eq!(kind, 0xFE);
+                assert_eq!(bytes, payload);
+            }
+            other => panic!("unexpected frame variant: {other:?}"),
+        }
     }
 
     #[tokio::test]
