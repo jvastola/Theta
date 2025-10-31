@@ -1,8 +1,27 @@
 use crate::network::EntityHandle;
 use crate::network::command_log::{CommandBatch, CommandPacket};
+use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub const CMD_ENTITY_TRANSLATE: &str = "editor.entity.translate";
+pub const CMD_ENTITY_ROTATE: &str = "editor.entity.rotate";
+pub const CMD_ENTITY_SCALE: &str = "editor.entity.scale";
+pub const CMD_TOOL_ACTIVATE: &str = "editor.tool.activate";
+pub const CMD_TOOL_DEACTIVATE: &str = "editor.tool.deactivate";
+pub const CMD_MESH_VERTEX_CREATE: &str = "editor.mesh.vertex_create";
+pub const CMD_MESH_EDGE_EXTRUDE: &str = "editor.mesh.edge_extrude";
+pub const CMD_MESH_FACE_SUBDIVIDE: &str = "editor.mesh.face_subdivide";
 
 pub const CMD_SELECTION_HIGHLIGHT: &str = "editor.selection.highlight";
+
+fn deserialize_metadata<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let option = Option::<HashMap<String, String>>::deserialize(deserializer)?;
+    Ok(option.unwrap_or_default())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SelectionHighlightCommand {
@@ -13,6 +32,146 @@ pub struct SelectionHighlightCommand {
 impl SelectionHighlightCommand {
     pub fn new(entity: EntityHandle, active: bool) -> Self {
         Self { entity, active }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EntityTranslateCommand {
+    pub entity: EntityHandle,
+    pub delta: [f32; 3],
+}
+
+impl EntityTranslateCommand {
+    pub fn new(entity: EntityHandle, delta: [f32; 3]) -> Self {
+        Self { entity, delta }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EntityRotateCommand {
+    pub entity: EntityHandle,
+    pub rotation: Quaternion,
+}
+
+impl EntityRotateCommand {
+    pub fn new(entity: EntityHandle, rotation: Quaternion) -> Self {
+        Self { entity, rotation }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EntityScaleCommand {
+    pub entity: EntityHandle,
+    pub scale: [f32; 3],
+}
+
+impl EntityScaleCommand {
+    pub fn new(entity: EntityHandle, scale: [f32; 3]) -> Self {
+        Self { entity, scale }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolActivateCommand {
+    pub tool_id: String,
+}
+
+impl ToolActivateCommand {
+    pub fn new(tool_id: impl Into<String>) -> Self {
+        Self {
+            tool_id: tool_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolDeactivateCommand {
+    pub tool_id: String,
+}
+
+impl ToolDeactivateCommand {
+    pub fn new(tool_id: impl Into<String>) -> Self {
+        Self {
+            tool_id: tool_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VertexCreateCommand {
+    pub position: [f32; 3],
+    #[serde(default, deserialize_with = "deserialize_metadata")]
+    pub metadata: HashMap<String, String>,
+}
+
+impl VertexCreateCommand {
+    pub fn new(position: [f32; 3], metadata: HashMap<String, String>) -> Self {
+        Self { position, metadata }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EdgeExtrudeCommand {
+    pub edge_id: u32,
+    pub direction: [f32; 3],
+}
+
+impl EdgeExtrudeCommand {
+    pub fn new(edge_id: u32, direction: [f32; 3]) -> Self {
+        Self { edge_id, direction }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SubdivideParams {
+    pub levels: u32,
+    pub smoothness: f32,
+}
+
+impl Default for SubdivideParams {
+    fn default() -> Self {
+        Self {
+            levels: 1,
+            smoothness: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FaceSubdivideCommand {
+    pub face_id: u32,
+    #[serde(default)]
+    pub params: SubdivideParams,
+}
+
+impl FaceSubdivideCommand {
+    pub fn new(face_id: u32, params: SubdivideParams) -> Self {
+        Self { face_id, params }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Quaternion {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
+impl Quaternion {
+    pub fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self { x, y, z, w }
+    }
+}
+
+impl Default for Quaternion {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        }
     }
 }
 
@@ -128,6 +287,7 @@ mod tests {
         AuthorId, CommandAuthor, CommandBatch, CommandEntry, CommandId, CommandPayload,
         CommandRole, CommandScope, ConflictStrategy,
     };
+    use std::collections::HashMap;
 
     #[test]
     fn outbox_accumulates_and_drains_batches() {
@@ -222,5 +382,44 @@ mod tests {
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].sequence, 1);
         assert!(queue.drain_pending().is_empty());
+    }
+
+    #[test]
+    fn mesh_commands_serialize_correctly() {
+        let mut metadata = HashMap::new();
+        metadata.insert("material".into(), "clay".into());
+        metadata.insert("symmetry".into(), "x".into());
+
+        let vertex = VertexCreateCommand::new([1.0, 2.0, 3.5], metadata.clone());
+        let encoded = serde_json::to_string(&vertex).expect("serialize vertex command");
+        let restored: VertexCreateCommand =
+            serde_json::from_str(&encoded).expect("deserialize vertex command");
+        assert_eq!(restored.position, vertex.position);
+        assert_eq!(restored.metadata, vertex.metadata);
+
+        let extrude = EdgeExtrudeCommand::new(77, [0.0, 1.0, 0.0]);
+        let encoded = serde_json::to_string(&extrude).expect("serialize edge extrude");
+        let restored: EdgeExtrudeCommand =
+            serde_json::from_str(&encoded).expect("deserialize edge extrude");
+        assert_eq!(restored.edge_id, extrude.edge_id);
+        assert_eq!(restored.direction, extrude.direction);
+
+        let subdivide = FaceSubdivideCommand::new(
+            91,
+            SubdivideParams {
+                levels: 3,
+                smoothness: 0.25,
+            },
+        );
+        let encoded = serde_json::to_string(&subdivide).expect("serialize subdivide");
+        let restored: FaceSubdivideCommand =
+            serde_json::from_str(&encoded).expect("deserialize subdivide");
+        assert_eq!(restored.face_id, subdivide.face_id);
+        assert_eq!(restored.params.levels, subdivide.params.levels);
+        assert!((restored.params.smoothness - subdivide.params.smoothness).abs() < f32::EPSILON);
+
+        let decoded: VertexCreateCommand =
+            serde_json::from_str("{\"position\":[0,0,0]}").expect("metadata should default");
+        assert!(decoded.metadata.is_empty());
     }
 }

@@ -66,14 +66,18 @@ Introduce an authoritative, signed command log that merges concurrent editor act
 
 ## Status (Oct 31, 2025)
 - Foundation: ✅ Command log core with Lamport ordering, role enforcement, and Ed25519 hooks.
-- Integration: 🔄 Command pipeline emits selection highlight commands, persists them in the `CommandOutbox`, and now feeds a `CommandTransportQueue` that surfaces serialized `CommandPacket` payloads ready for transmission. Integration tests cover both outbox and transport queue wiring.
-- Reliability: 🔄 Batch replay helpers (`CommandLog::integrate_batch` / `CommandPacket`) and a property-based fuzz harness validate deterministic convergence; telemetry metrics remain pending.
+- Integration: ✅ Command pipeline drives `CommandOutbox`/`CommandTransportQueue`, transports replicate packets over QUIC, and remote apply keeps editor state synchronized. Integration tests exercise outbox, queue, and transport framing.
+- Reliability: 🔄 Batch replay helpers (`CommandLog::integrate_batch` / `CommandPacket`) and a property-based fuzz harness validate deterministic convergence; command metrics/telemetry are instrumented, with remaining work focused on validation tests and documentation polish.
 
 ## Next Actions
-- Wire `CommandTransportQueue` into QUIC/WebRTC transports so `CommandPacket`s broadcast to remote peers and replay on receipt.
-- Instrument command metrics (append rate, conflict rejections, queue backlog) and surface them via telemetry/diagnostics.
-- Expand editor command coverage (e.g., gizmo transforms) and add signature enforcement paths once transport hooks land.
-- Schedule fuzz harness in CI (nightly) and capture minimal repro artifacts for failed seeds.
+- Finalize Phase 4 deliverables
+   - Implement additional editor command verbs (transform gizmo, tool state, mesh skeleton) with serialization/apply paths.
+   - Add unit/integration coverage for command metrics and new command types; extend telemetry documentation.
+   - Wire telemetry metrics reference into docs and confirm CI execution of fuzz harness on nightly schedule.
+- Kick off Phase 5 groundwork
+   - Prototype nonce-based replay protection in `CommandPacket` framing.
+   - Scope command rate limiting design (token bucket per author) and payload size guards for transport receive.
+   - Draft Phase 5 plan outlining compression rollout and audit trail persistence.
 
 ## Follow-Up (Phase 4.1+)
 - Integrate command log snapshots with ECS snapshots for rapid rewinds.

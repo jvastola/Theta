@@ -3,7 +3,13 @@ pub use self::commands::CommandMetricsSnapshot;
 pub use self::commands::CommandPipeline;
 pub mod schedule;
 use crate::ecs::World;
-use crate::editor::commands::{CMD_SELECTION_HIGHLIGHT, SelectionHighlightCommand};
+use crate::editor::commands::{
+    CMD_ENTITY_ROTATE, CMD_ENTITY_SCALE, CMD_ENTITY_TRANSLATE, CMD_MESH_EDGE_EXTRUDE,
+    CMD_MESH_FACE_SUBDIVIDE, CMD_MESH_VERTEX_CREATE, CMD_SELECTION_HIGHLIGHT, CMD_TOOL_ACTIVATE,
+    CMD_TOOL_DEACTIVATE, EdgeExtrudeCommand, EntityRotateCommand, EntityScaleCommand,
+    EntityTranslateCommand, FaceSubdivideCommand, SelectionHighlightCommand, ToolActivateCommand,
+    ToolDeactivateCommand, VertexCreateCommand,
+};
 use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
 use crate::editor::{CommandOutbox, CommandTransportQueue};
 use crate::network::EntityHandle;
@@ -173,6 +179,7 @@ impl Engine {
             world.register_component::<TelemetryReplicator>();
             world.register_component::<CommandOutbox>();
             world.register_component::<CommandTransportQueue>();
+            world.register_component::<EditorToolState>();
         }
 
         let stats_entity = {
@@ -220,6 +227,9 @@ impl Engine {
             world
                 .insert(editor_entity, CommandTransportQueue::default())
                 .expect("command transport queue should insert");
+            world
+                .insert(editor_entity, EditorToolState::default())
+                .expect("editor tool state component should insert");
         }
 
         let input_source = Arc::clone(&self.input_provider);
@@ -401,12 +411,16 @@ struct FrameStats {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Transform {
     position: [f32; 3],
+    rotation: [f32; 4],
+    scale: [f32; 3],
 }
 
 impl Default for Transform {
     fn default() -> Self {
         Self {
             position: [0.0, 1.6, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
         }
     }
 }
@@ -448,6 +462,37 @@ impl Default for EditorSelection {
             highlight_interval: 120,
             highlight_active: true,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EditorToolState {
+    active_tool: Option<String>,
+    last_lamport: Option<u64>,
+}
+
+impl Default for EditorToolState {
+    fn default() -> Self {
+        Self {
+            active_tool: None,
+            last_lamport: None,
+        }
+    }
+}
+
+impl EditorToolState {
+    fn activate(&mut self, tool_id: String, lamport: u64) {
+        self.active_tool = Some(tool_id);
+        self.last_lamport = Some(lamport);
+    }
+
+    fn deactivate(&mut self, lamport: u64) {
+        self.active_tool = None;
+        self.last_lamport = Some(lamport);
+    }
+
+    fn matches_active(&self, tool_id: &str) -> bool {
+        self.active_tool.as_deref() == Some(tool_id)
     }
 }
 
@@ -511,6 +556,20 @@ fn initialize_editor_state(world: &mut World, primary: crate::ecs::Entity) -> cr
         .insert(entity, selection)
         .expect("editor selection component");
     entity
+}
+
+fn sanitize_scale(mut scale: [f32; 3]) -> [f32; 3] {
+    for axis in scale.iter_mut() {
+        if !axis.is_finite() {
+            *axis = 1.0;
+            continue;
+        }
+
+        if axis.abs() < 0.000_1 {
+            *axis = if *axis >= 0.0 { 0.000_1 } else { -0.000_1 };
+        }
+    }
+    scale
 }
 
 impl Default for Engine {
@@ -864,6 +923,168 @@ impl Engine {
                         }
                     }
                 }
+                CMD_ENTITY_TRANSLATE => {
+                    match serde_json::from_slice::<EntityTranslateCommand>(&entry.payload.data) {
+                        Ok(command) => {
+                            let target_entity = crate::ecs::Entity::from(command.entity);
+                            if let Some(transform) = world.get_mut::<Transform>(target_entity) {
+                                for (axis, delta) in
+                                    transform.position.iter_mut().zip(command.delta.iter())
+                                {
+                                    *axis += *delta;
+                                }
+                            } else {
+                                log::warn!(
+                                    "[commands] translate target {:?} missing transform",
+                                    command.entity
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[commands] failed to decode EntityTranslateCommand payload: {err}"
+                            );
+                        }
+                    }
+                }
+                CMD_ENTITY_ROTATE => {
+                    match serde_json::from_slice::<EntityRotateCommand>(&entry.payload.data) {
+                        Ok(command) => {
+                            let target_entity = crate::ecs::Entity::from(command.entity);
+                            if let Some(transform) = world.get_mut::<Transform>(target_entity) {
+                                transform.rotation = [
+                                    command.rotation.x,
+                                    command.rotation.y,
+                                    command.rotation.z,
+                                    command.rotation.w,
+                                ];
+                            } else {
+                                log::warn!(
+                                    "[commands] rotate target {:?} missing transform",
+                                    command.entity
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[commands] failed to decode EntityRotateCommand payload: {err}"
+                            );
+                        }
+                    }
+                }
+                CMD_ENTITY_SCALE => {
+                    match serde_json::from_slice::<EntityScaleCommand>(&entry.payload.data) {
+                        Ok(command) => {
+                            let target_entity = crate::ecs::Entity::from(command.entity);
+                            if let Some(transform) = world.get_mut::<Transform>(target_entity) {
+                                transform.scale = sanitize_scale(command.scale);
+                            } else {
+                                log::warn!(
+                                    "[commands] scale target {:?} missing transform",
+                                    command.entity
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[commands] failed to decode EntityScaleCommand payload: {err}"
+                            );
+                        }
+                    }
+                }
+                CMD_TOOL_ACTIVATE => {
+                    match serde_json::from_slice::<ToolActivateCommand>(&entry.payload.data) {
+                        Ok(command) => {
+                            if let Some(tool_state) =
+                                world.get_mut::<EditorToolState>(editor_entity)
+                            {
+                                tool_state.activate(command.tool_id.clone(), entry.id.lamport());
+                            } else {
+                                log::warn!(
+                                    "[commands] editor tool state component missing on {:?}",
+                                    editor_entity
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[commands] failed to decode ToolActivateCommand payload: {err}"
+                            );
+                        }
+                    }
+                }
+                CMD_TOOL_DEACTIVATE => {
+                    match serde_json::from_slice::<ToolDeactivateCommand>(&entry.payload.data) {
+                        Ok(command) => {
+                            if let Some(tool_state) =
+                                world.get_mut::<EditorToolState>(editor_entity)
+                            {
+                                if tool_state.matches_active(&command.tool_id) {
+                                    tool_state.deactivate(entry.id.lamport());
+                                }
+                            } else {
+                                log::warn!(
+                                    "[commands] editor tool state component missing on {:?}",
+                                    editor_entity
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[commands] failed to decode ToolDeactivateCommand payload: {err}"
+                            );
+                        }
+                    }
+                }
+                CMD_MESH_VERTEX_CREATE => {
+                    match serde_json::from_slice::<VertexCreateCommand>(&entry.payload.data) {
+                        Ok(command) => {
+                            log::debug!(
+                                "[commands] mesh vertex create queued at position {:?} metadata {:?}",
+                                command.position,
+                                command.metadata
+                            );
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[commands] failed to decode VertexCreateCommand payload: {err}"
+                            );
+                        }
+                    }
+                }
+                CMD_MESH_EDGE_EXTRUDE => {
+                    match serde_json::from_slice::<EdgeExtrudeCommand>(&entry.payload.data) {
+                        Ok(command) => {
+                            log::debug!(
+                                "[commands] mesh edge {} extrude direction {:?}",
+                                command.edge_id,
+                                command.direction
+                            );
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[commands] failed to decode EdgeExtrudeCommand payload: {err}"
+                            );
+                        }
+                    }
+                }
+                CMD_MESH_FACE_SUBDIVIDE => {
+                    match serde_json::from_slice::<FaceSubdivideCommand>(&entry.payload.data) {
+                        Ok(command) => {
+                            log::debug!(
+                                "[commands] mesh face {} subdivide levels {} smoothness {:.3}",
+                                command.face_id,
+                                command.params.levels,
+                                command.params.smoothness
+                            );
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "[commands] failed to decode FaceSubdivideCommand payload: {err}"
+                            );
+                        }
+                    }
+                }
                 other => {
                     log::debug!(
                         "[commands] ignoring unhandled remote command type {}",
@@ -880,6 +1101,7 @@ crate::register_component_types!(
     Transform,
     Velocity,
     EditorSelection,
+    EditorToolState,
     CommandOutbox,
     CommandTransportQueue
 );
@@ -887,6 +1109,10 @@ crate::register_component_types!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::commands::{
+        EntityRotateCommand, EntityScaleCommand, EntityTranslateCommand, Quaternion,
+        ToolActivateCommand, ToolDeactivateCommand,
+    };
     use crate::network::command_log::{
         AuthorId, CommandAuthor, CommandEntry, CommandId, CommandPayload, CommandRole,
         CommandScope, ConflictStrategy,
@@ -932,5 +1158,159 @@ mod tests {
         assert_eq!(selection.primary, Some(primary_entity));
         assert!(!selection.highlight_active);
         assert_eq!(selection.frames_since_change, 0);
+    }
+
+    #[test]
+    fn transform_commands_mutate_entities() {
+        let mut engine = Engine::new();
+
+        let (primary_entity, handle) = {
+            let world = engine.world();
+            let selection_entry = world
+                .component_entries::<EditorSelection>()
+                .into_iter()
+                .next()
+                .expect("selection component present");
+            let primary = selection_entry
+                .1
+                .primary
+                .expect("selection should have primary");
+            let handle = EntityHandle::from(primary);
+            (primary, handle)
+        };
+
+        let mut original_position = [0.0f32; 3];
+        if let Some(transform) = engine.world().get::<Transform>(primary_entity) {
+            original_position = transform.position;
+        }
+
+        let translate = EntityTranslateCommand::new(handle.clone(), [0.5, -0.25, 0.0]);
+        let translate_entry = CommandEntry::new(
+            CommandId::new(10, AuthorId(1)),
+            1,
+            CommandPayload::new(
+                CMD_ENTITY_TRANSLATE,
+                CommandScope::Entity(handle.clone()),
+                serde_json::to_vec(&translate).unwrap(),
+            ),
+            ConflictStrategy::Merge,
+            CommandAuthor::new(AuthorId(1), CommandRole::Editor),
+            None,
+        );
+        engine.apply_remote_entries(&[translate_entry]);
+
+        let mutated = engine
+            .world()
+            .get::<Transform>(primary_entity)
+            .expect("transform present");
+        assert!((mutated.position[0] - (original_position[0] + 0.5)).abs() < 1e-5);
+        assert!((mutated.position[1] - (original_position[1] - 0.25)).abs() < 1e-5);
+
+        let rotate = EntityRotateCommand::new(
+            handle.clone(),
+            Quaternion::new(0.0, 0.0, 0.707_106_77, 0.707_106_77),
+        );
+        let rotate_entry = CommandEntry::new(
+            CommandId::new(11, AuthorId(1)),
+            2,
+            CommandPayload::new(
+                CMD_ENTITY_ROTATE,
+                CommandScope::Entity(handle.clone()),
+                serde_json::to_vec(&rotate).unwrap(),
+            ),
+            ConflictStrategy::LastWriteWins,
+            CommandAuthor::new(AuthorId(1), CommandRole::Editor),
+            None,
+        );
+        engine.apply_remote_entries(&[rotate_entry]);
+
+        let rotated = engine
+            .world()
+            .get::<Transform>(primary_entity)
+            .expect("transform present");
+        assert!((rotated.rotation[3] - 0.707_106_77).abs() < 1e-5);
+
+        let scale = EntityScaleCommand::new(handle.clone(), [2.0, 1.0, 0.5]);
+        let scale_entry = CommandEntry::new(
+            CommandId::new(12, AuthorId(1)),
+            3,
+            CommandPayload::new(
+                CMD_ENTITY_SCALE,
+                CommandScope::Entity(handle.clone()),
+                serde_json::to_vec(&scale).unwrap(),
+            ),
+            ConflictStrategy::LastWriteWins,
+            CommandAuthor::new(AuthorId(1), CommandRole::Editor),
+            None,
+        );
+        engine.apply_remote_entries(&[scale_entry]);
+
+        let scaled = engine
+            .world()
+            .get::<Transform>(primary_entity)
+            .expect("transform present");
+        assert!((scaled.scale[0] - 2.0).abs() < 1e-5);
+        assert!((scaled.scale[2] - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn tool_state_commands_track_active_tool() {
+        let mut engine = Engine::new();
+
+        let editor_entity = {
+            let world = engine.world();
+            let entry = world
+                .component_entries::<EditorSelection>()
+                .into_iter()
+                .next()
+                .expect("editor selection present");
+            entry.0
+        };
+
+        let activate = ToolActivateCommand::new("gizmo.translate");
+        let activate_entry = CommandEntry::new(
+            CommandId::new(20, AuthorId(2)),
+            10,
+            CommandPayload::new(
+                CMD_TOOL_ACTIVATE,
+                CommandScope::Tool("gizmo.translate".into()),
+                serde_json::to_vec(&activate).unwrap(),
+            ),
+            ConflictStrategy::LastWriteWins,
+            CommandAuthor::new(AuthorId(2), CommandRole::Editor),
+            None,
+        );
+        engine.apply_remote_entries(&[activate_entry]);
+
+        {
+            let world = engine.world();
+            let tool_state = world
+                .get::<EditorToolState>(editor_entity)
+                .expect("tool state present");
+            assert_eq!(tool_state.active_tool.as_deref(), Some("gizmo.translate"));
+            assert_eq!(tool_state.last_lamport, Some(20));
+        }
+
+        let deactivate = ToolDeactivateCommand::new("gizmo.translate");
+        let deactivate_entry = CommandEntry::new(
+            CommandId::new(21, AuthorId(2)),
+            11,
+            CommandPayload::new(
+                CMD_TOOL_DEACTIVATE,
+                CommandScope::Tool("gizmo.translate".into()),
+                serde_json::to_vec(&deactivate).unwrap(),
+            ),
+            ConflictStrategy::LastWriteWins,
+            CommandAuthor::new(AuthorId(2), CommandRole::Editor),
+            None,
+        );
+        engine.apply_remote_entries(&[deactivate_entry]);
+
+        let world = engine.world();
+        let tool_state = world
+            .get::<EditorToolState>(editor_entity)
+            .expect("tool state present");
+        assert!(tool_state.active_tool.is_none());
+        assert_eq!(tool_state.last_lamport, Some(21));
     }
 }

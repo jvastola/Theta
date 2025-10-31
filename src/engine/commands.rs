@@ -1,4 +1,10 @@
-use crate::editor::commands::{CMD_SELECTION_HIGHLIGHT, SelectionHighlightCommand};
+use crate::editor::commands::{
+    CMD_ENTITY_ROTATE, CMD_ENTITY_SCALE, CMD_ENTITY_TRANSLATE, CMD_MESH_EDGE_EXTRUDE,
+    CMD_MESH_FACE_SUBDIVIDE, CMD_MESH_VERTEX_CREATE, CMD_SELECTION_HIGHLIGHT, CMD_TOOL_ACTIVATE,
+    CMD_TOOL_DEACTIVATE, EdgeExtrudeCommand, EntityRotateCommand, EntityScaleCommand,
+    EntityTranslateCommand, FaceSubdivideCommand, Quaternion, SelectionHighlightCommand,
+    SubdivideParams, ToolActivateCommand, ToolDeactivateCommand, VertexCreateCommand,
+};
 use crate::network::command_log::{
     AuthorId, CommandAuthor, CommandDefinition, CommandEntry, CommandId, CommandLog,
     CommandLogError, CommandPacket, CommandPayload, CommandRegistry, CommandRole, CommandScope,
@@ -30,6 +36,70 @@ impl CommandPipeline {
             CommandDefinition::builder()
                 .required_role(CommandRole::Editor)
                 .default_strategy(ConflictStrategy::LastWriteWins)
+                .require_signature(false)
+                .build(),
+        );
+        registry.register(
+            CMD_ENTITY_TRANSLATE,
+            CommandDefinition::builder()
+                .required_role(CommandRole::Editor)
+                .default_strategy(ConflictStrategy::Merge)
+                .require_signature(false)
+                .build(),
+        );
+        registry.register(
+            CMD_ENTITY_ROTATE,
+            CommandDefinition::builder()
+                .required_role(CommandRole::Editor)
+                .default_strategy(ConflictStrategy::LastWriteWins)
+                .require_signature(false)
+                .build(),
+        );
+        registry.register(
+            CMD_ENTITY_SCALE,
+            CommandDefinition::builder()
+                .required_role(CommandRole::Editor)
+                .default_strategy(ConflictStrategy::LastWriteWins)
+                .require_signature(false)
+                .build(),
+        );
+        registry.register(
+            CMD_TOOL_ACTIVATE,
+            CommandDefinition::builder()
+                .required_role(CommandRole::Editor)
+                .default_strategy(ConflictStrategy::LastWriteWins)
+                .require_signature(false)
+                .build(),
+        );
+        registry.register(
+            CMD_TOOL_DEACTIVATE,
+            CommandDefinition::builder()
+                .required_role(CommandRole::Editor)
+                .default_strategy(ConflictStrategy::LastWriteWins)
+                .require_signature(false)
+                .build(),
+        );
+        registry.register(
+            CMD_MESH_VERTEX_CREATE,
+            CommandDefinition::builder()
+                .required_role(CommandRole::Editor)
+                .default_strategy(ConflictStrategy::Merge)
+                .require_signature(false)
+                .build(),
+        );
+        registry.register(
+            CMD_MESH_EDGE_EXTRUDE,
+            CommandDefinition::builder()
+                .required_role(CommandRole::Editor)
+                .default_strategy(ConflictStrategy::Merge)
+                .require_signature(false)
+                .build(),
+        );
+        registry.register(
+            CMD_MESH_FACE_SUBDIVIDE,
+            CommandDefinition::builder()
+                .required_role(CommandRole::Editor)
+                .default_strategy(ConflictStrategy::Merge)
                 .require_signature(false)
                 .build(),
         );
@@ -94,6 +164,95 @@ impl CommandPipeline {
         let payload =
             CommandPayload::new(CMD_SELECTION_HIGHLIGHT, CommandScope::Entity(entity), data);
         self.append_payload(payload, Some(ConflictStrategy::LastWriteWins))
+    }
+
+    pub fn record_entity_translate(
+        &mut self,
+        entity: EntityHandle,
+        delta: [f32; 3],
+    ) -> Result<(), CommandLogError> {
+        let command = EntityTranslateCommand::new(entity, delta);
+        let data = to_vec(&command).expect("serialize translate command");
+        let payload = CommandPayload::new(CMD_ENTITY_TRANSLATE, CommandScope::Entity(entity), data);
+        self.append_payload(payload, Some(ConflictStrategy::Merge))
+    }
+
+    pub fn record_entity_rotate(
+        &mut self,
+        entity: EntityHandle,
+        rotation: Quaternion,
+    ) -> Result<(), CommandLogError> {
+        let normalized = normalize_quaternion(rotation);
+        let command = EntityRotateCommand::new(entity, normalized);
+        let data = to_vec(&command).expect("serialize rotate command");
+        let payload = CommandPayload::new(CMD_ENTITY_ROTATE, CommandScope::Entity(entity), data);
+        self.append_payload(payload, Some(ConflictStrategy::LastWriteWins))
+    }
+
+    pub fn record_entity_scale(
+        &mut self,
+        entity: EntityHandle,
+        scale: [f32; 3],
+    ) -> Result<(), CommandLogError> {
+        let command = EntityScaleCommand::new(entity, scale);
+        let data = to_vec(&command).expect("serialize scale command");
+        let payload = CommandPayload::new(CMD_ENTITY_SCALE, CommandScope::Entity(entity), data);
+        self.append_payload(payload, Some(ConflictStrategy::LastWriteWins))
+    }
+
+    pub fn record_tool_activate(
+        &mut self,
+        tool_id: impl Into<String>,
+    ) -> Result<(), CommandLogError> {
+        let tool_id = tool_id.into();
+        let command = ToolActivateCommand::new(tool_id.clone());
+        let data = to_vec(&command).expect("serialize tool activate command");
+        let payload = CommandPayload::new(CMD_TOOL_ACTIVATE, CommandScope::Tool(tool_id), data);
+        self.append_payload(payload, Some(ConflictStrategy::LastWriteWins))
+    }
+
+    pub fn record_tool_deactivate(
+        &mut self,
+        tool_id: impl Into<String>,
+    ) -> Result<(), CommandLogError> {
+        let tool_id = tool_id.into();
+        let command = ToolDeactivateCommand::new(tool_id.clone());
+        let data = to_vec(&command).expect("serialize tool deactivate command");
+        let payload = CommandPayload::new(CMD_TOOL_DEACTIVATE, CommandScope::Tool(tool_id), data);
+        self.append_payload(payload, Some(ConflictStrategy::LastWriteWins))
+    }
+
+    pub fn record_mesh_vertex_create(
+        &mut self,
+        position: [f32; 3],
+        metadata: HashMap<String, String>,
+    ) -> Result<(), CommandLogError> {
+        let command = VertexCreateCommand::new(position, metadata);
+        let data = to_vec(&command).expect("serialize vertex create command");
+        let payload = CommandPayload::new(CMD_MESH_VERTEX_CREATE, CommandScope::Global, data);
+        self.append_payload(payload, Some(ConflictStrategy::Merge))
+    }
+
+    pub fn record_mesh_edge_extrude(
+        &mut self,
+        edge_id: u32,
+        direction: [f32; 3],
+    ) -> Result<(), CommandLogError> {
+        let command = EdgeExtrudeCommand::new(edge_id, direction);
+        let data = to_vec(&command).expect("serialize edge extrude command");
+        let payload = CommandPayload::new(CMD_MESH_EDGE_EXTRUDE, CommandScope::Global, data);
+        self.append_payload(payload, Some(ConflictStrategy::Merge))
+    }
+
+    pub fn record_mesh_face_subdivide(
+        &mut self,
+        face_id: u32,
+        params: SubdivideParams,
+    ) -> Result<(), CommandLogError> {
+        let command = FaceSubdivideCommand::new(face_id, params);
+        let data = to_vec(&command).expect("serialize face subdivide command");
+        let payload = CommandPayload::new(CMD_MESH_FACE_SUBDIVIDE, CommandScope::Global, data);
+        self.append_payload(payload, Some(ConflictStrategy::Merge))
     }
 
     pub fn drain_packets(&mut self) -> Vec<CommandPacket> {
@@ -177,6 +336,25 @@ impl CommandPipeline {
     pub fn attach_transport_session(&mut self, session: &TransportSession) {
         self.session.attach_transport_session(session);
     }
+}
+
+fn normalize_quaternion(mut rotation: Quaternion) -> Quaternion {
+    let magnitude = (rotation.x * rotation.x
+        + rotation.y * rotation.y
+        + rotation.z * rotation.z
+        + rotation.w * rotation.w)
+        .sqrt();
+
+    if magnitude <= f32::EPSILON {
+        return Quaternion::default();
+    }
+
+    let inv = 1.0 / magnitude;
+    rotation.x *= inv;
+    rotation.y *= inv;
+    rotation.z *= inv;
+    rotation.w *= inv;
+    rotation
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -338,5 +516,54 @@ mod tests {
         let decoded = packets[0].decode().expect("decode batch");
         assert_eq!(decoded.entries.len(), 1);
         assert!(decoded.entries[0].id.lamport() > entry.id.lamport());
+    }
+
+    #[test]
+    fn command_metrics_update_on_append() {
+        let mut pipeline = CommandPipeline::new();
+        let entity = EntityHandle {
+            index: 3,
+            generation: 1,
+        };
+
+        pipeline
+            .record_entity_translate(entity, [0.1, 0.0, 0.0])
+            .expect("append translate");
+        pipeline.update_queue_depth(5);
+
+        let metrics = pipeline.metrics_snapshot();
+        assert_eq!(metrics.total_appended, 1);
+        assert!(metrics.append_rate_per_sec >= 0.0);
+        assert_eq!(metrics.queue_depth, 5);
+
+        let payload = serde_json::to_vec(&SelectionHighlightCommand::new(entity, false))
+            .expect("serialize highlight");
+        let remote_entry = CommandEntry::new(
+            CommandId::new(50, AuthorId(42)),
+            12,
+            CommandPayload::new(
+                CMD_SELECTION_HIGHLIGHT,
+                CommandScope::Entity(entity),
+                payload,
+            ),
+            ConflictStrategy::LastWriteWins,
+            CommandAuthor::new(AuthorId(42), CommandRole::Editor),
+            None,
+        );
+        let batch = CommandBatch {
+            sequence: 7,
+            timestamp_ms: 99,
+            entries: vec![remote_entry],
+        };
+        let packet = CommandPacket::from_batch(&batch).expect("packet serialize");
+
+        pipeline
+            .integrate_remote_packet(&packet)
+            .expect("integrate remote");
+
+        let updated = pipeline.metrics_snapshot();
+        assert!(updated.signature_verify_latency_ms >= 0.0);
+        assert_eq!(updated.total_appended, 1);
+        assert_eq!(updated.queue_depth, 5);
     }
 }

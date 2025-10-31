@@ -284,6 +284,7 @@ impl TelemetryOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::command_log::ConflictStrategy;
     use crate::network::{ChangeSet, DiffPayload};
     use proptest::prelude::*;
 
@@ -419,6 +420,30 @@ mod tests {
 
         let render_series = overlay.rolling_series(Stage::Render);
         assert_eq!(render_series.len(), 2);
+    }
+
+    #[test]
+    fn telemetry_overlay_displays_command_throughput() {
+        let mut overlay = TelemetryOverlay::default();
+        let mut sample = static_sample(4);
+        let mut conflicts = std::collections::HashMap::new();
+        conflicts.insert(ConflictStrategy::LastWriteWins, 1);
+        conflicts.insert(ConflictStrategy::Merge, 2);
+
+        sample.set_command_metrics(Some(CommandMetricsSnapshot {
+            total_appended: 7,
+            append_rate_per_sec: 3.5,
+            conflict_rejections: conflicts,
+            queue_depth: 4,
+            signature_verify_latency_ms: 5.25,
+        }));
+
+        overlay.ingest(sample);
+        let panel = overlay.text_panel().expect("panel text");
+        assert!(panel.contains("Commands rate"));
+        assert!(panel.contains("total 7"));
+        assert!(panel.contains("queue 4"));
+        assert!(panel.contains("Conflicts"));
     }
 
     proptest::prop_compose! {
