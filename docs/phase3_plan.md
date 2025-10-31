@@ -85,7 +85,7 @@ Implement the ECS replication pipeline that streams initial world snapshots and 
 - Documentation updated (`docs/network_protocol_schema_plan.md` and this plan) with status and follow-up tasks.
 - Telemetry surfaces replication bandwidth statistics.
 - Registry refactored to reference-based API (no Arc cloning).
-- 48 tests passing across all modules.
+- 59 tests passing across all modules (53 unit + 6 integration).
 
 ## Follow-Up (Phase 3.2+)
 

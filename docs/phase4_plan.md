@@ -66,8 +66,8 @@ Introduce an authoritative, signed command log that merges concurrent editor act
 
 ## Status (Oct 31, 2025)
 - Foundation: ✅ Command log core with Lamport ordering, role enforcement, and Ed25519 hooks.
-- Integration: 🔄 Engine command pipeline emits selection highlight commands, routes batches into the new `CommandOutbox` ECS component, and is covered by integration tests.
-- Reliability: ⬜ Fuzz harness, replay helpers, and telemetry metrics remain pending.
+- Integration: 🔄 Command pipeline emits selection highlight commands, persists them in the `CommandOutbox`, and now feeds a `CommandTransportQueue` that surfaces serialized `CommandPacket` payloads ready for transmission. Integration tests cover both outbox and transport queue wiring.
+- Reliability: 🔄 Batch replay helpers (`CommandLog::integrate_batch` / `CommandPacket`) and a property-based fuzz harness validate deterministic convergence; telemetry metrics remain pending.
 
 ## Follow-Up (Phase 4.1+)
 - Integrate command log snapshots with ECS snapshots for rapid rewinds.

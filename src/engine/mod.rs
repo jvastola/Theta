@@ -3,8 +3,8 @@ pub mod schedule;
 
 use self::commands::CommandPipeline;
 use crate::ecs::World;
-use crate::editor::CommandOutbox;
 use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
+use crate::editor::{CommandOutbox, CommandTransportQueue};
 use crate::network::EntityHandle;
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
 #[cfg(feature = "vr-openxr")]
@@ -138,6 +138,7 @@ impl Engine {
             world.register_component::<TelemetrySurface>();
             world.register_component::<TelemetryReplicator>();
             world.register_component::<CommandOutbox>();
+            world.register_component::<CommandTransportQueue>();
         }
 
         let stats_entity = {
@@ -182,6 +183,9 @@ impl Engine {
             world
                 .insert(editor_entity, CommandOutbox::default())
                 .expect("command outbox component should insert");
+            world
+                .insert(editor_entity, CommandTransportQueue::default())
+                .expect("command transport queue should insert");
         }
 
         let input_source = Arc::clone(&self.input_provider);
@@ -581,10 +585,31 @@ impl Engine {
                 }
 
                 if let Some(entity) = self.command_entity {
-                    if let Some(outbox) =
-                        self.scheduler.world_mut().get_mut::<CommandOutbox>(entity)
-                    {
-                        outbox.ingest(drained);
+                    let packets = {
+                        let world = self.scheduler.world_mut();
+                        if let Some(outbox) = world.get_mut::<CommandOutbox>(entity) {
+                            outbox.ingest(drained);
+                            outbox.drain_packets()
+                        } else {
+                            Vec::new()
+                        }
+                    };
+
+                    if !packets.is_empty() {
+                        {
+                            let world = self.scheduler.world_mut();
+                            if let Some(queue) = world.get_mut::<CommandTransportQueue>(entity) {
+                                queue.enqueue(packets.iter().cloned());
+                            }
+                        }
+
+                        for packet in &packets {
+                            log::info!(
+                                "[commands] transport queued seq {} ({} bytes)",
+                                packet.sequence,
+                                packet.payload.len()
+                            );
+                        }
                     }
                 }
             }
@@ -597,5 +622,6 @@ crate::register_component_types!(
     Transform,
     Velocity,
     EditorSelection,
-    CommandOutbox
+    CommandOutbox,
+    CommandTransportQueue
 );

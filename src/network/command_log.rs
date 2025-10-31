@@ -1,5 +1,6 @@
 use crate::network::EntityHandle;
 use serde::{Deserialize, Serialize};
+use serde_json::Error as JsonError;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use thiserror::Error;
@@ -252,6 +253,8 @@ pub enum CommandLogError {
     ConflictRejected,
     #[error("duplicate command id")]
     Duplicate,
+    #[error("failed to decode command packet: {0}")]
+    PacketDecodeFailed(String),
 }
 
 #[derive(Default, Clone)]
@@ -452,6 +455,23 @@ impl CommandLog {
     pub fn latest_id(&self) -> Option<CommandId> {
         self.entries.keys().next_back().cloned()
     }
+
+    pub fn integrate_batch(&mut self, batch: &CommandBatch) -> Result<usize, CommandLogError> {
+        let mut applied = 0;
+        for entry in &batch.entries {
+            if self.integrate_remote(entry.clone())? {
+                applied += 1;
+            }
+        }
+        Ok(applied)
+    }
+
+    pub fn integrate_packet(&mut self, packet: &CommandPacket) -> Result<usize, CommandLogError> {
+        let batch = packet
+            .decode()
+            .map_err(|err| CommandLogError::PacketDecodeFailed(err.to_string()))?;
+        self.integrate_batch(&batch)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -459,6 +479,34 @@ pub struct CommandBatch {
     pub sequence: u64,
     pub timestamp_ms: u64,
     pub entries: Vec<CommandEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandPacket {
+    pub sequence: u64,
+    pub timestamp_ms: u64,
+    pub payload: Vec<u8>,
+}
+
+impl CommandPacket {
+    pub fn from_batch(batch: &CommandBatch) -> Result<Self, JsonError> {
+        Ok(Self {
+            sequence: batch.sequence,
+            timestamp_ms: batch.timestamp_ms,
+            payload: serde_json::to_vec(batch)?,
+        })
+    }
+
+    /// Decodes the payload into a CommandBatch.
+    /// Note: The sequence and timestamp fields are present both in the packet and the payload.
+    /// This method trusts the values from the payload for consistency, but you may wish to validate
+    /// or reconcile these fields if you expect them to differ.
+    pub fn decode(&self) -> Result<CommandBatch, JsonError> {
+        let batch: CommandBatch = serde_json::from_slice(&self.payload)?;
+        // If you want to ensure consistency, you could assert or compare the fields here.
+        // For now, we return the batch as deserialized.
+        Ok(batch)
+    }
 }
 
 #[derive(Default)]
@@ -590,6 +638,7 @@ impl CommandSigner for Ed25519CommandSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn setup_registry() -> Arc<CommandRegistry> {
         let mut registry = CommandRegistry::new();
@@ -758,5 +807,113 @@ mod tests {
         assert_eq!(entries.len(), 3);
         let payloads: Vec<_> = entries.iter().map(|e| e.payload.data.clone()).collect();
         assert_eq!(payloads, vec![vec![0], vec![1], vec![2]]);
+    }
+
+    #[test]
+    fn integrate_batch_replays_entries() {
+        let registry = setup_registry();
+        let verifier = Arc::new(NoopSignatureVerifier::default()) as Arc<dyn SignatureVerifier>;
+        let mut local = CommandLog::new(Arc::clone(&registry), Arc::clone(&verifier));
+        let mut remote = CommandLog::new(registry, verifier);
+
+        let editor = CommandAuthor::new(AuthorId(10), CommandRole::Editor);
+        let signer = FakeSignatureSigner::new(editor.clone());
+
+        for value in 0..3u8 {
+            let payload = CommandPayload::new(
+                "editor.create",
+                CommandScope::Tool("brush".to_string()),
+                vec![value],
+            );
+            local
+                .append_local(&signer, payload, Some(ConflictStrategy::Merge))
+                .expect("append");
+        }
+
+        let entries: Vec<_> = local.entries().cloned().collect();
+        let batch = CommandBatch {
+            sequence: 1,
+            timestamp_ms: 123,
+            entries,
+        };
+
+        let applied = remote.integrate_batch(&batch).expect("replay batch");
+        assert_eq!(applied, 3);
+        let remote_entries: Vec<_> = remote.entries().cloned().collect();
+        assert_eq!(remote_entries.len(), 3);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn replay_fuzz_matches_direct_application(ops in proptest::collection::vec(
+            (
+                proptest::num::u16::ANY,
+                proptest::num::u8::ANY,
+                proptest::num::u8::ANY,
+                proptest::bool::ANY,
+            ),
+            1..48
+        )) {
+            let registry = setup_registry();
+            let verifier_local = Arc::new(NoopSignatureVerifier::default()) as Arc<dyn SignatureVerifier>;
+            let verifier_remote = Arc::new(NoopSignatureVerifier::default()) as Arc<dyn SignatureVerifier>;
+            let mut local = CommandLog::new(Arc::clone(&registry), verifier_local);
+            let mut remote = CommandLog::new(Arc::clone(&registry), verifier_remote);
+            let mut replay = CommandLog::new(Arc::clone(&registry), Arc::new(NoopSignatureVerifier::default()) as Arc<dyn SignatureVerifier>);
+
+            let author = CommandAuthor::new(AuthorId(42), CommandRole::Editor);
+            let signer = FakeSignatureSigner::new(author);
+            let mut last_id: Option<CommandId> = None;
+            let mut batches = Vec::new();
+
+            for (scope_seed, payload_seed, strategy_seed, tool_scope) in ops {
+                let scope = if tool_scope {
+                    CommandScope::Tool(format!("tool-{}", scope_seed % 5))
+                } else {
+                    CommandScope::Entity(EntityHandle {
+                        index: (scope_seed % 16) as u32,
+                        generation: (scope_seed % 3) as u32,
+                    })
+                };
+
+                let strategy = match strategy_seed % 3 {
+                    0 => ConflictStrategy::LastWriteWins,
+                    1 => ConflictStrategy::Merge,
+                    _ => ConflictStrategy::LastWriteWins,
+                };
+
+                let payload_bytes = vec![payload_seed];
+                let command_type = if strategy_seed % 2 == 0 {
+                    "editor.selection"
+                } else {
+                    "editor.create"
+                };
+
+                let payload = CommandPayload::new(command_type, scope, payload_bytes);
+                if local.append_local(&signer, payload, Some(strategy)).is_ok() {
+                    let new_entries = local.entries_since(last_id.as_ref());
+                    if !new_entries.is_empty() {
+                        let batch = CommandBatch {
+                            sequence: batches.len() as u64 + 1,
+                            timestamp_ms: batches.len() as u64 + 100,
+                            entries: new_entries.clone(),
+                        };
+                        remote.integrate_batch(&batch).expect("batch replay");
+                        let packet = CommandPacket::from_batch(&batch).expect("packet serialize");
+                        replay.integrate_packet(&packet).expect("packet replay");
+                        batches.push(batch);
+                        last_id = local.latest_id();
+                    }
+                }
+            }
+
+            let local_entries: Vec<_> = local.entries().cloned().collect();
+            let remote_entries: Vec<_> = remote.entries().cloned().collect();
+            let replay_entries: Vec<_> = replay.entries().cloned().collect();
+
+            let baseline = local_entries.clone();
+            prop_assert_eq!(remote_entries, baseline);
+            prop_assert_eq!(replay_entries, local_entries);
+        }
     }
 }
