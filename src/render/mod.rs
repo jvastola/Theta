@@ -403,18 +403,11 @@ pub mod wgpu_backend {
                 self.resize(device, size, format);
             }
 
-            let slot_index = self.next_available_slot();
+            let slot_index = self
+                .next_available_slot()
+                .unwrap_or_else(|| self.reuse_in_flight_slot());
+
             let slot = &self.slots[slot_index];
-
-            if !slot.fence.swap(false, Ordering::AcqRel) {
-                // No free image; fall back to current slot and warn.
-                eprintln!(
-                    "[render] eye {} exhausted swapchain images; reusing in-flight image",
-                    self.eye_index
-                );
-            }
-
-            self.cursor = (slot_index + 1) % self.slots.len();
 
             let texture = Arc::clone(&slot.texture);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -461,17 +454,42 @@ pub mod wgpu_backend {
             self.cursor = 0;
         }
 
-        fn next_available_slot(&mut self) -> usize {
-            let slot_count = self.slots.len().max(1);
+        fn next_available_slot(&mut self) -> Option<usize> {
+            if self.slots.is_empty() {
+                return None;
+            }
+
+            let slot_count = self.slots.len();
             for offset in 0..slot_count {
                 let index = (self.cursor + offset) % slot_count;
                 let fence = &self.slots[index].fence;
-                if fence.load(Ordering::Acquire) {
-                    return index;
+                if fence
+                    .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    self.cursor = (index + 1) % slot_count;
+                    return Some(index);
                 }
             }
-            // If none are available, reuse current cursor.
-            self.cursor % slot_count
+
+            None
+        }
+
+        fn reuse_in_flight_slot(&mut self) -> usize {
+            assert!(
+                !self.slots.is_empty(),
+                "swapchain slots must be initialized before reuse"
+            );
+
+            let index = self.cursor % self.slots.len();
+            let fence = &self.slots[index].fence;
+            let _ = fence.swap(false, Ordering::AcqRel);
+            eprintln!(
+                "[render] eye {} buffer pool exhausted; reusing in-flight image (expect reprojection)",
+                self.eye_index
+            );
+            self.cursor = (index + 1) % self.slots.len();
+            index
         }
     }
 
