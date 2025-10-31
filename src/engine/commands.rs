@@ -7,8 +7,11 @@ use crate::network::command_log::{
 #[cfg(feature = "network-quic")]
 use crate::network::transport::TransportSession;
 use crate::network::{EntityHandle, NetworkSession};
+use serde::{Deserialize, Serialize};
 use serde_json::to_vec;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub struct CommandPipeline {
     log: CommandLog,
@@ -16,6 +19,7 @@ pub struct CommandPipeline {
     session: NetworkSession,
     last_published: Option<CommandId>,
     pending_packets: Vec<CommandPacket>,
+    metrics: CommandMetricsInternal,
 }
 
 impl CommandPipeline {
@@ -41,6 +45,7 @@ impl CommandPipeline {
             session: NetworkSession::connect(),
             last_published: None,
             pending_packets: Vec::new(),
+            metrics: CommandMetricsInternal::default(),
         }
     }
 
@@ -49,8 +54,25 @@ impl CommandPipeline {
         payload: CommandPayload,
         strategy: Option<ConflictStrategy>,
     ) -> Result<(), CommandLogError> {
-        self.log
-            .append_local(self.signer.as_ref(), payload, strategy)?;
+        let strategy_hint = strategy.unwrap_or(ConflictStrategy::LastWriteWins);
+        let append_result = self
+            .log
+            .append_local(self.signer.as_ref(), payload, strategy);
+
+        if let Err(err) = append_result {
+            if matches!(
+                err,
+                CommandLogError::ConflictRejected
+                    | CommandLogError::Duplicate
+                    | CommandLogError::InsufficientPermissions { .. }
+            ) {
+                self.metrics.record_conflict(strategy_hint);
+            }
+            return Err(err);
+        }
+
+        self.metrics.record_local_append();
+
         let new_entries = self.log.entries_since(self.last_published.as_ref());
         if !new_entries.is_empty() {
             self.last_published = self.log.latest_id();
@@ -88,9 +110,36 @@ impl CommandPipeline {
             .map_err(|err| CommandLogError::PacketDecodeFailed(err.to_string()))?;
 
         let mut applied = Vec::new();
-        for entry in &batch.entries {
-            if self.log.integrate_remote(entry)? {
-                applied.push(entry.clone());
+        for entry in batch.entries {
+            let start = Instant::now();
+            let result = self.log.integrate_remote(entry.clone());
+            let latency_ms = start.elapsed().as_secs_f32() * 1000.0;
+            self.metrics.record_signature_latency(latency_ms);
+
+            match result {
+                Ok(true) => applied.push(entry),
+                Ok(false) => {
+                    self.metrics.record_conflict(entry.strategy);
+                }
+                Err(CommandLogError::ConflictRejected) => {
+                    self.metrics.record_conflict(entry.strategy);
+                    log::warn!(
+                        "[commands] remote command {:?} rejected by conflict strategy",
+                        entry.id
+                    );
+                }
+                Err(CommandLogError::Duplicate) => {
+                    self.metrics.record_conflict(entry.strategy);
+                    log::debug!("[commands] duplicate remote command {:?} ignored", entry.id);
+                }
+                Err(CommandLogError::InsufficientPermissions { .. }) => {
+                    self.metrics.record_conflict(entry.strategy);
+                    log::warn!(
+                        "[commands] remote command {:?} failed permission check",
+                        entry.id
+                    );
+                }
+                Err(err) => return Err(err),
             }
         }
 
@@ -99,6 +148,14 @@ impl CommandPipeline {
         }
 
         Ok(applied)
+    }
+
+    pub fn update_queue_depth(&mut self, depth: usize) {
+        self.metrics.update_queue_depth(depth);
+    }
+
+    pub fn metrics_snapshot(&self) -> CommandMetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     #[allow(dead_code)]
@@ -119,6 +176,77 @@ impl CommandPipeline {
     #[cfg(feature = "network-quic")]
     pub fn attach_transport_session(&mut self, session: &TransportSession) {
         self.session.attach_transport_session(session);
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct CommandMetricsSnapshot {
+    pub total_appended: u64,
+    pub append_rate_per_sec: f32,
+    pub conflict_rejections: std::collections::HashMap<ConflictStrategy, u64>,
+    pub queue_depth: usize,
+    pub signature_verify_latency_ms: f32,
+}
+
+#[derive(Default)]
+struct CommandMetricsInternal {
+    total_appended: u64,
+    append_rate_per_sec: f32,
+    last_append_time: Option<Instant>,
+    conflict_rejections: HashMap<ConflictStrategy, u64>,
+    signature_verify_latency_ms: f32,
+    queue_depth: usize,
+}
+
+impl CommandMetricsInternal {
+    fn record_local_append(&mut self) {
+        self.total_appended = self.total_appended.saturating_add(1);
+        let now = Instant::now();
+        if let Some(last) = self.last_append_time {
+            let delta = now.duration_since(last).as_secs_f32();
+            if delta > 0.000_1 {
+                let instantaneous = 1.0 / delta;
+                self.append_rate_per_sec = if self.append_rate_per_sec == 0.0 {
+                    instantaneous
+                } else {
+                    let alpha = 0.2;
+                    self.append_rate_per_sec * (1.0 - alpha) + instantaneous * alpha
+                };
+            }
+        }
+        self.last_append_time = Some(now);
+    }
+
+    fn record_conflict(&mut self, strategy: ConflictStrategy) {
+        let entry = self.conflict_rejections.entry(strategy).or_insert(0);
+        *entry = entry.saturating_add(1);
+    }
+
+    fn record_signature_latency(&mut self, latency_ms: f32) {
+        if latency_ms <= 0.0 {
+            return;
+        }
+        if self.signature_verify_latency_ms == 0.0 {
+            self.signature_verify_latency_ms = latency_ms;
+        } else {
+            let alpha = 0.2;
+            self.signature_verify_latency_ms =
+                self.signature_verify_latency_ms * (1.0 - alpha) + latency_ms * alpha;
+        }
+    }
+
+    fn update_queue_depth(&mut self, depth: usize) {
+        self.queue_depth = depth;
+    }
+
+    fn snapshot(&self) -> CommandMetricsSnapshot {
+        CommandMetricsSnapshot {
+            total_appended: self.total_appended,
+            append_rate_per_sec: self.append_rate_per_sec,
+            conflict_rejections: self.conflict_rejections.clone(),
+            queue_depth: self.queue_depth,
+            signature_verify_latency_ms: self.signature_verify_latency_ms,
+        }
     }
 }
 

@@ -115,6 +115,10 @@ impl CommandTransportQueue {
     pub fn last_packet(&self) -> Option<&CommandPacket> {
         self.sent.last()
     }
+
+    pub fn pending_depth(&self) -> usize {
+        self.pending.len()
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use crate::ecs::Entity;
+use crate::engine::CommandMetricsSnapshot;
 use crate::engine::schedule::Stage;
 use crate::network::{
     ChangeSet, ComponentDescriptor, ComponentDiff, ComponentKey, DiffPayload, NetworkSession,
@@ -24,6 +25,7 @@ pub struct FrameTelemetry {
     pub stage_samples: Vec<StageSample>,
     pub controller_trigger: [f32; 2],
     pub transport: Option<crate::network::TransportDiagnostics>,
+    pub command_metrics: Option<CommandMetricsSnapshot>,
 }
 
 impl FrameTelemetry {
@@ -59,6 +61,7 @@ impl FrameTelemetry {
             stage_samples,
             controller_trigger,
             transport: None,
+            command_metrics: None,
         }
     }
 
@@ -68,6 +71,10 @@ impl FrameTelemetry {
     ) -> Self {
         self.transport = metrics;
         self
+    }
+
+    pub fn set_command_metrics(&mut self, metrics: Option<CommandMetricsSnapshot>) {
+        self.command_metrics = metrics;
     }
 }
 
@@ -226,6 +233,26 @@ impl TelemetryOverlay {
                 metrics.packets_received,
                 metrics.compression_ratio
             ));
+        }
+
+        if let Some(commands) = &latest.command_metrics {
+            lines.push(format!(
+                "  Commands rate {:>5.2}/s total {} queue {} sig-lat {:>6.2} ms",
+                commands.append_rate_per_sec,
+                commands.total_appended,
+                commands.queue_depth,
+                commands.signature_verify_latency_ms
+            ));
+
+            if !commands.conflict_rejections.is_empty() {
+                let mut conflicts: Vec<String> = commands
+                    .conflict_rejections
+                    .iter()
+                    .map(|(strategy, count)| format!("{:?}:{}", strategy, count))
+                    .collect();
+                conflicts.sort();
+                lines.push(format!("    Conflicts {}", conflicts.join(", ")));
+            }
         }
 
         Some(lines.join("\n"))

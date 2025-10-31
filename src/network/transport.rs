@@ -10,7 +10,7 @@ use rand::{RngCore, rngs::OsRng};
 use std::convert::TryInto;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
@@ -211,16 +211,30 @@ impl TransportSession {
             return Ok(());
         }
 
+        let send_start = Instant::now();
+        let mut total_bytes = 0usize;
         for packet in packets {
             let frame = encode_command_packet_frame(packet)?;
+            total_bytes = total_bytes.saturating_add(frame.len());
             self.replication.write_frame(&frame).await?;
         }
 
         let sent = packets.len() as u64;
+        let elapsed = send_start.elapsed().as_secs_f32();
         self.metrics.update(|m| {
             m.packets_sent = m.packets_sent.saturating_add(sent);
+            m.command_packets_sent = m.command_packets_sent.saturating_add(sent);
             if sent > 0 {
                 m.compression_ratio = 1.0;
+            }
+            if total_bytes > 0 {
+                let bandwidth = if elapsed > 0.0 {
+                    total_bytes as f32 / elapsed
+                } else {
+                    total_bytes as f32
+                };
+                m.command_bandwidth_bytes_per_sec = bandwidth;
+                m.command_latency_ms = elapsed * 1000.0;
             }
         });
 
@@ -240,9 +254,14 @@ impl TransportSession {
 
             match decode_replication_frame(&frame) {
                 Ok(DecodedReplicationFrame::Command(packet)) => {
+                    let latency_ms =
+                        (current_time_millis().saturating_sub(packet.timestamp_ms)) as f32;
                     self.metrics.update(|m| {
                         m.packets_received = m.packets_received.saturating_add(1);
+                        m.command_packets_received = m.command_packets_received.saturating_add(1);
                         m.compression_ratio = 1.0;
+                        m.command_bandwidth_bytes_per_sec = frame.len() as f32;
+                        m.command_latency_ms = latency_ms;
                     });
                     return Ok(Some(packet));
                 }

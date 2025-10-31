@@ -53,6 +53,10 @@ pub struct TransportDiagnostics {
     pub packets_sent: u64,
     pub packets_received: u64,
     pub compression_ratio: f32,
+    pub command_packets_sent: u64,
+    pub command_packets_received: u64,
+    pub command_bandwidth_bytes_per_sec: f32,
+    pub command_latency_ms: f32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]

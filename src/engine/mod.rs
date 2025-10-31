@@ -1,7 +1,7 @@
 mod commands;
+pub use self::commands::CommandMetricsSnapshot;
+pub use self::commands::CommandPipeline;
 pub mod schedule;
-
-use self::commands::CommandPipeline;
 use crate::ecs::World;
 use crate::editor::commands::{CMD_SELECTION_HIGHLIGHT, SelectionHighlightCommand};
 use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
@@ -542,6 +542,7 @@ impl Engine {
     fn update_frame_diagnostics(&mut self) {
         let profile = self.scheduler.last_profile().clone();
         let mut telemetry_sample = None;
+        let mut command_metrics_snapshot: Option<CommandMetricsSnapshot> = None;
 
         #[cfg(feature = "network-quic")]
         self.poll_remote_commands();
@@ -590,23 +591,6 @@ impl Engine {
                     &stats.stage_violation_count,
                     stats.controller_trigger,
                 ));
-            }
-        }
-
-        if let (Some(entity), Some(sample)) = (self.telemetry_entity, telemetry_sample) {
-            let world = self.scheduler.world_mut();
-            let mut latest_to_publish = None;
-
-            if let Some(surface) = world.get_mut::<TelemetrySurface>(entity) {
-                if surface.record(sample) {
-                    latest_to_publish = surface.latest().cloned();
-                }
-            }
-
-            if let Some(latest) = latest_to_publish {
-                if let Some(replicator) = world.get_mut::<TelemetryReplicator>(entity) {
-                    replicator.publish(entity, &latest);
-                }
             }
         }
 
@@ -728,6 +712,43 @@ impl Engine {
                             }
                         }
                     }
+                }
+            }
+
+            if let Some(entity) = self.command_entity {
+                if let Some(depth) = self
+                    .scheduler
+                    .world()
+                    .get::<CommandTransportQueue>(entity)
+                    .map(|queue| queue.pending_depth())
+                {
+                    pipeline.update_queue_depth(depth);
+                }
+            }
+
+            command_metrics_snapshot = Some(pipeline.metrics_snapshot());
+        }
+
+        if let Some(sample) = telemetry_sample.as_mut() {
+            sample.set_command_metrics(command_metrics_snapshot.clone());
+        }
+
+        if let (Some(entity), Some(sample)) = (self.telemetry_entity, telemetry_sample) {
+            let world = self.scheduler.world_mut();
+            let mut latest_to_publish = None;
+
+            if let Some(surface) = world.get_mut::<TelemetrySurface>(entity) {
+                if surface.record(sample) {
+                    latest_to_publish = surface.latest().cloned();
+                }
+            }
+
+            if let Some(mut latest) = latest_to_publish {
+                if command_metrics_snapshot.is_some() {
+                    latest.set_command_metrics(command_metrics_snapshot.clone());
+                }
+                if let Some(replicator) = world.get_mut::<TelemetryReplicator>(entity) {
+                    replicator.publish(entity, &latest);
                 }
             }
         }
