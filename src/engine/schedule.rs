@@ -424,4 +424,32 @@ mod tests {
 
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
+
+    #[test]
+    fn render_stage_flags_read_only_violations() {
+        let mut scheduler = Scheduler::default();
+        scheduler.world_mut().register_component::<u32>();
+        let entity = scheduler.world_mut().spawn();
+        scheduler
+            .world_mut()
+            .insert(entity, 0u32)
+            .expect("component insert");
+
+        scheduler.add_system_fn(Stage::Render, "mutator", move |world, _| {
+            if let Some(value) = world.get_mut::<u32>(entity) {
+                *value += 1;
+            }
+        });
+
+        scheduler.tick(0.016);
+
+        let profile = scheduler.last_profile().clone();
+        let render_stage = profile
+            .stage(Stage::Render)
+            .expect("render stage profile should exist");
+
+        assert!(render_stage.read_only_violation);
+        assert_eq!(render_stage.sequential_systems.len(), 1);
+        assert_eq!(render_stage.parallel_count, 0);
+    }
 }
