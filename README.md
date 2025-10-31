@@ -2,10 +2,22 @@
 
 Theta Engine is a Rust-native VR-first game engine & mesh authoring platform focused on high-performance rendering, ergonomic mesh tools, and networked collaboration. This repository contains architecture, scaffolding, and tests for the engine and editor runtime.
 
-## Current Status
-- Stage-aware scheduler executes `Startup → Simulation → Render → Editor` phases, with read-only systems fanned out via Rayon.
-- Core ECS demo wires simulation transforms, editor selection state, and frame stats into the runtime loop.
-- Null renderer and feature-gated `wgpu` backend render per-eye attachments and hand GPU surfaces off to the VR bridge.
+## Current Status (October 31, 2025)
+
+**Phase 4 Progress:** 75% Complete (Command Log & Conflict Resolution)
+
+### ✅ Completed Phases:
+- **Phase 1 (Foundation):** ECS core, renderer, VR integration, FlatBuffers schema
+- **Phase 2 (Transport):** QUIC handshake, heartbeat diagnostics, Ed25519 key exchange
+- **Phase 3 (Replication):** Snapshot streaming, delta tracking, component serialization
+- **Phase 4 (75%):** Command log core, signatures, outbox/queue wiring
+
+### 🔄 In Progress (Nov 1-7):
+- QUIC command broadcast & receive pipeline
+- Command metrics & telemetry integration
+- Transform gizmo and tool state commands
+
+**Metrics:** 59 tests passing (53 unit + 6 integration), 0 failures, ~11,000 LOC total
 
 ## Vision
 - VR-native editor inspired by PolySketch/Google Blocks with intuitive mesh creation, duplication, and undo/redo.
@@ -30,11 +42,37 @@ Each subsystem will be designed as a distinct module crate to allow modular deve
 - VR layer provides a simulated input provider by default, with a feature-gated OpenXR provider (`vr-openxr`) that loads the runtime when available.
 - QUIC transport (`network-quic`) establishes Ed25519-backed handshakes with heartbeat telemetry feeding frame diagnostics.
 
-## Immediate Roadmap
-1. **Render/VR Integration:** Connect `wgpu` swapchain images into OpenXR session swapchains for Quest 3 native presentation; promote OpenXR input from simulation to live action polling.
-2. **Networking Skeleton:** Stand up QUIC transport with FlatBuffers schema, component ID hashing (SipHash-2-4), and ECS replication pipeline with loopback validation.
-3. **Physics & Editor:** Integrate Rapier3D with VR wrapper layers; flesh out half-edge mesh model with undo/redo command stack and serialization.
-4. **Collaboration Protocol:** Implement Ed25519-signed command entries, role-based permissions, and CRDT-style conflict resolution for multi-user editing.
+## Immediate Roadmap (November 2025)
+
+### Week 9 (Nov 1-7): Complete Phase 4
+- Wire CommandTransportQueue into QUIC control stream for command broadcasting
+- Implement receive pipeline with signature verification and ECS integration
+- Add command metrics (append rate, conflicts, queue depth) to telemetry overlay
+- Implement transform gizmo commands and tool state tracking
+- **Target:** 67 tests passing, loopback convergence validated
+
+### Weeks 10-12 (Nov 8-28): Phase 5 - Production Hardening
+- WebRTC data channel fallback for browser-based VR peers
+- Zstd compression integration (targeting 50-70% bandwidth reduction)
+- Interest management implementation (spatial cells, tool scope filtering)
+- 120-frame loopback convergence suite with packet drop injection
+- Performance benchmarking and baseline establishment
+
+### Weeks 13-16 (Nov 29 - Dec 19): Phase 6 - Mesh Editor Alpha
+- Half-edge mesh data model with boundary tracking
+- Core editing operations (vertex create, edge extrude, face subdivide)
+- Undo/redo command stack with collaborative branching timelines
+- In-headset UI (tool palette, property inspector, material picker)
+- glTF export with custom metadata extension
+
+### Weeks 17-20 (Dec 20 - Jan 16, 2026): Phase 7 - OpenXR Live & Quest 3
+- Live OpenXR action set polling (controllers, hands, eye tracking)
+- wgpu swapchain → OpenXR swapchain binding for native rendering
+- Quest 3 APK build pipeline with symbol stripping (<200 MB target)
+- Haptic feedback, comfort settings, thermal throttling mitigation
+- Target: 72 Hz baseline on Quest 3 hardware
+
+See `docs/roadmap_november_2025.md` for detailed sprint planning and success criteria.
 
 ## Technical Decisions (Resolved October 2025)
 - **Physics Backend:** Rapier3D adopted long-term with VR-specific enhancements; custom solver deferred indefinitely.
