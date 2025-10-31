@@ -371,4 +371,191 @@ mod tests {
         assert_eq!(third.diffs.len(), 1);
         assert!(matches!(third.diffs[0].payload, DiffPayload::Remove));
     }
+
+    #[test]
+    fn empty_world_produces_empty_snapshot() {
+        let registry = setup_registry();
+        let world = build_world();
+        let builder = WorldSnapshotBuilder::new(Arc::clone(&registry));
+        let snapshot = builder.build(&world);
+
+        assert!(snapshot.is_empty());
+        assert_eq!(snapshot.total_components(), 0);
+        assert_eq!(snapshot.chunks().len(), 0);
+    }
+
+    #[test]
+    fn snapshot_single_component_fits_one_chunk() {
+        let registry = setup_registry();
+        let mut world = build_world();
+        let entity = world.spawn();
+        world
+            .insert(entity, TestComponent { value: 42 })
+            .expect("insert");
+
+        let builder = WorldSnapshotBuilder::new(Arc::clone(&registry));
+        let snapshot = builder.build(&world);
+
+        assert_eq!(snapshot.chunks().len(), 1);
+        assert_eq!(snapshot.total_components(), 1);
+        assert_eq!(snapshot.chunks()[0].chunk_index, 0);
+        assert_eq!(snapshot.chunks()[0].total_chunks, 1);
+    }
+
+    #[test]
+    fn delta_tracker_stable_under_no_changes() {
+        let registry = setup_registry();
+        let mut world = build_world();
+        let entity = world.spawn();
+        world
+            .insert(entity, TestComponent { value: 10 })
+            .expect("insert");
+
+        let mut tracker = DeltaTracker::new(Arc::clone(&registry));
+        let first = tracker.diff(&world);
+        assert_eq!(first.diffs.len(), 1);
+
+        let second = tracker.diff(&world);
+        assert!(second.is_empty());
+        assert_eq!(second.diffs.len(), 0);
+
+        let third = tracker.diff(&world);
+        assert!(third.is_empty());
+    }
+
+    #[test]
+    fn multiple_entities_tracked_independently() {
+        let registry = setup_registry();
+        let mut world = build_world();
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        world.insert(e1, TestComponent { value: 1 }).expect("insert");
+        world.insert(e2, TestComponent { value: 2 }).expect("insert");
+
+        let mut tracker = DeltaTracker::new(Arc::clone(&registry));
+        let first = tracker.diff(&world);
+        assert_eq!(first.diffs.len(), 2);
+
+        if let Some(c) = world.get_mut::<TestComponent>(e1) {
+            c.value = 100;
+        }
+
+        let second = tracker.diff(&world);
+        assert_eq!(second.diffs.len(), 1);
+        assert!(matches!(second.diffs[0].payload, DiffPayload::Update { .. }));
+        assert_eq!(second.diffs[0].entity.index, e1.index());
+    }
+
+    #[test]
+    fn registry_deduplicates_component_registration() {
+        let mut registry = ReplicationRegistry::new();
+        registry.register::<TestComponent>();
+        registry.register::<TestComponent>();
+        registry.register::<TestComponent>();
+
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(registry.registered.len(), 1);
+    }
+
+    #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+    struct AnotherComponent {
+        name: String,
+    }
+
+    #[test]
+    fn snapshot_handles_multiple_component_types() {
+        let mut registry = ReplicationRegistry::new();
+        registry.register::<TestComponent>();
+        registry.register::<AnotherComponent>();
+        let registry = Arc::new(registry);
+
+        let mut world = World::new();
+        world.register_component::<TestComponent>();
+        world.register_component::<AnotherComponent>();
+
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        world.insert(e1, TestComponent { value: 7 }).expect("insert");
+        world
+            .insert(e2, AnotherComponent {
+                name: "test".into(),
+            })
+            .expect("insert");
+
+        let builder = WorldSnapshotBuilder::new(Arc::clone(&registry));
+        let snapshot = builder.build(&world);
+
+        assert_eq!(snapshot.total_components(), 2);
+        let component_keys: Vec<_> = snapshot
+            .chunks()
+            .iter()
+            .flat_map(|chunk| chunk.components.iter())
+            .map(|c| c.component.type_name.as_str())
+            .collect();
+        assert!(component_keys
+            .iter()
+            .any(|name| name.contains("TestComponent")));
+        assert!(component_keys
+            .iter()
+            .any(|name| name.contains("AnotherComponent")));
+    }
+
+    #[test]
+    fn delta_tracker_advertises_component_once() {
+        let registry = setup_registry();
+        let mut world = build_world();
+        let mut tracker = DeltaTracker::new(Arc::clone(&registry));
+
+        let e1 = world.spawn();
+        world.insert(e1, TestComponent { value: 1 }).expect("insert");
+        let first = tracker.diff(&world);
+        assert_eq!(first.descriptors.len(), 1);
+
+        let e2 = world.spawn();
+        world.insert(e2, TestComponent { value: 2 }).expect("insert");
+        let second = tracker.diff(&world);
+        assert_eq!(second.descriptors.len(), 0);
+    }
+
+    #[test]
+    fn chunking_enforces_minimum_one_component_per_chunk() {
+        let registry = setup_registry();
+        let mut world = build_world();
+        let entity = world.spawn();
+        world
+            .insert(entity, TestComponent { value: 999 })
+            .expect("insert");
+
+        let builder = WorldSnapshotBuilder::new(Arc::clone(&registry)).with_chunk_limit(1);
+        let snapshot = builder.build(&world);
+
+        assert_eq!(snapshot.chunks().len(), 1);
+        assert_eq!(snapshot.chunks()[0].components.len(), 1);
+    }
+
+    #[test]
+    fn delta_tracker_handles_despawn_of_multiple_entities() {
+        let registry = setup_registry();
+        let mut world = build_world();
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        let e3 = world.spawn();
+        world.insert(e1, TestComponent { value: 1 }).expect("insert");
+        world.insert(e2, TestComponent { value: 2 }).expect("insert");
+        world.insert(e3, TestComponent { value: 3 }).expect("insert");
+
+        let mut tracker = DeltaTracker::new(Arc::clone(&registry));
+        tracker.diff(&world);
+
+        world.despawn(e1).expect("despawn");
+        world.despawn(e3).expect("despawn");
+
+        let delta = tracker.diff(&world);
+        let removes: Vec<_> = delta
+            .diffs
+            .iter()
+            .filter(|d| matches!(d.payload, DiffPayload::Remove))
+            .collect();
+        assert_eq!(removes.len(), 2);
+    }
 }
