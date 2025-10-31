@@ -234,8 +234,11 @@ impl Engine {
                     stats.controller_trigger[1]
                 );
                 println!(
-                    "           stage timings ms {:?} (seq {:?}, par {:?})",
-                    stats.stage_durations_ms, stats.stage_sequential_ms, stats.stage_parallel_ms
+                    "           stage timings ms {:?} (seq {:?}, par {:?}, avg {:?})",
+                    stats.stage_durations_ms,
+                    stats.stage_sequential_ms,
+                    stats.stage_parallel_ms,
+                    stats.stage_rolling_ms
                 );
                 for (stage, &violation) in Stage::ordered()
                     .iter()
@@ -243,8 +246,9 @@ impl Engine {
                 {
                     if violation {
                         println!(
-                            "           warning: {:?} stage executed exclusive systems",
-                            stage
+                            "           warning: {:?} stage executed exclusive systems (total {} violations)",
+                            stage,
+                            stats.stage_violation_count[stage.index()]
                         );
                     }
                 }
@@ -319,7 +323,10 @@ struct FrameStats {
     stage_durations_ms: [f32; Stage::count()],
     stage_sequential_ms: [f32; Stage::count()],
     stage_parallel_ms: [f32; Stage::count()],
+    stage_rolling_ms: [f32; Stage::count()],
     stage_read_only_violation: [bool; Stage::count()],
+    stage_violation_count: [u32; Stage::count()],
+    profiling_samples: u64,
     controller_trigger: [f32; 2],
 }
 
@@ -474,6 +481,8 @@ impl Engine {
                 .world_mut()
                 .get_mut::<FrameStats>(stats_entity)
             {
+                let prev_samples = stats.profiling_samples;
+                let new_samples = prev_samples.saturating_add(1);
                 for stage in Stage::ordered() {
                     let index = stage.index();
                     if let Some(stage_profile) = profile.stage(stage) {
@@ -481,8 +490,23 @@ impl Engine {
                         stats.stage_sequential_ms[index] = stage_profile.sequential_ms();
                         stats.stage_parallel_ms[index] = stage_profile.parallel_ms();
                         stats.stage_read_only_violation[index] = stage_profile.read_only_violation;
+
+                        let prev_average = stats.stage_rolling_ms[index];
+                        stats.stage_rolling_ms[index] = if prev_samples == 0 {
+                            stage_profile.total_ms()
+                        } else {
+                            let delta = stage_profile.total_ms() - prev_average;
+                            prev_average + delta / (new_samples as f32)
+                        };
+
+                        if stage_profile.read_only_violation {
+                            stats.stage_violation_count[index] =
+                                stats.stage_violation_count[index].saturating_add(1);
+                        }
                     }
                 }
+
+                stats.profiling_samples = new_samples;
 
                 telemetry_sample = Some(FrameTelemetry::from_stage_arrays(
                     stats.frames,
@@ -490,7 +514,9 @@ impl Engine {
                     &stats.stage_durations_ms,
                     &stats.stage_sequential_ms,
                     &stats.stage_parallel_ms,
+                    &stats.stage_rolling_ms,
                     &stats.stage_read_only_violation,
+                    &stats.stage_violation_count,
                     stats.controller_trigger,
                 ));
             }

@@ -20,7 +20,10 @@ fn engine_emits_change_sets_after_running() {
     let latest = surface.latest().expect("latest telemetry sample after run");
     assert!(latest.frame >= 1);
     assert_eq!(latest.stage_samples.len(), Stage::count());
-    assert_eq!(latest.stage_samples[0].stage, Stage::Startup.label());
+    assert_eq!(
+        latest.stage_samples[0].stage.as_str(),
+        Stage::Startup.label()
+    );
 
     let replicator = world
         .get::<TelemetryReplicator>(telemetry_entity)
@@ -40,6 +43,12 @@ fn engine_emits_change_sets_after_running() {
                 serde_json::from_slice(bytes).expect("telemetry payload should decode");
             assert_eq!(decoded.frame, latest.frame);
             assert_eq!(decoded.stage_samples.len(), Stage::count());
+            assert!(
+                decoded
+                    .stage_samples
+                    .iter()
+                    .all(|sample| sample.rolling_ms.is_finite())
+            );
         }
         other => panic!("expected update payload, got {:?}", other),
     }

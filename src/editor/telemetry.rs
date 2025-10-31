@@ -9,7 +9,9 @@ pub struct StageSample {
     pub total_ms: f32,
     pub sequential_ms: f32,
     pub parallel_ms: f32,
+    pub rolling_ms: f32,
     pub read_only_violation: bool,
+    pub violation_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +30,9 @@ impl FrameTelemetry {
         stage_total_ms: &[f32; Stage::count()],
         stage_sequential_ms: &[f32; Stage::count()],
         stage_parallel_ms: &[f32; Stage::count()],
+        stage_rolling_ms: &[f32; Stage::count()],
         stage_read_only_violation: &[bool; Stage::count()],
+        stage_violation_count: &[u32; Stage::count()],
         controller_trigger: [f32; 2],
     ) -> Self {
         let stage_samples = Stage::ordered()
@@ -39,7 +43,9 @@ impl FrameTelemetry {
                 total_ms: stage_total_ms[index],
                 sequential_ms: stage_sequential_ms[index],
                 parallel_ms: stage_parallel_ms[index],
+                rolling_ms: stage_rolling_ms[index],
                 read_only_violation: stage_read_only_violation[index],
+                violation_count: stage_violation_count[index],
             })
             .collect();
 
@@ -138,7 +144,9 @@ mod tests {
         totals: [f32; Stage::count()],
         sequential: [f32; Stage::count()],
         parallel: [f32; Stage::count()],
+        rolling: [f32; Stage::count()],
         violations: [bool; Stage::count()],
+        violation_counts: [u32; Stage::count()],
         triggers: [f32; 2],
     ) -> FrameTelemetry {
         FrameTelemetry::from_stage_arrays(
@@ -147,7 +155,9 @@ mod tests {
             &totals,
             &sequential,
             &parallel,
+            &rolling,
             &violations,
+            &violation_counts,
             triggers,
         )
     }
@@ -159,7 +169,9 @@ mod tests {
             [1.0, 2.0, 3.0, 4.0],
             [0.5, 1.0, 1.5, 2.0],
             [0.25, 0.5, 0.75, 1.0],
+            [1.0, 2.0, 3.0, 4.0],
             [false, true, false, true],
+            [0, 1, 0, 2],
             [0.1, 0.9],
         )
     }
@@ -169,11 +181,13 @@ mod tests {
         let telemetry = static_sample(7);
         assert_eq!(telemetry.stage_samples.len(), Stage::count());
         for (sample, stage) in telemetry.stage_samples.iter().zip(Stage::ordered()) {
-            assert_eq!(sample.stage, stage.label());
+            assert_eq!(sample.stage.as_str(), stage.label());
         }
         assert_eq!(telemetry.frame, 7);
         assert_eq!(telemetry.controller_trigger, [0.1, 0.9]);
         assert!(telemetry.stage_samples[1].read_only_violation);
+        assert_eq!(telemetry.stage_samples[0].rolling_ms, 1.0);
+        assert_eq!(telemetry.stage_samples[1].violation_count, 1);
     }
 
     #[test]
@@ -215,6 +229,10 @@ mod tests {
                     serde_json::from_slice(bytes).expect("telemetry should deserialize");
                 assert_eq!(round_trip.frame, telemetry.frame);
                 assert_eq!(round_trip.stage_samples.len(), Stage::count());
+                assert_eq!(
+                    round_trip.stage_samples[3].violation_count,
+                    telemetry.stage_samples[3].violation_count
+                );
             }
             _ => panic!("replicator should emit update payloads"),
         }
@@ -239,6 +257,12 @@ mod tests {
         }
     }
 
+    proptest::prop_compose! {
+        fn violation_counts()(values in proptest::array::uniform4(0u16..200u16)) -> [u32; Stage::count()] {
+            values.map(|v| v as u32)
+        }
+    }
+
     proptest::proptest! {
         #[test]
         fn replicator_sequences_monotonic_under_interleaving(
@@ -250,7 +274,9 @@ mod tests {
                     stage_arrays(),
                     stage_arrays(),
                     stage_arrays(),
+                    stage_arrays(),
                     proptest::array::uniform4(any::<bool>()),
+                    violation_counts(),
                     triggers(),
                 ),
                 1..32
@@ -268,8 +294,9 @@ mod tests {
                 Entity::new(303, 0),
             ];
             let mut history: [Vec<ChangeSet>; PUBLISHERS] = std::array::from_fn(|_| Vec::new());
+            let mut expectations: [Vec<FrameTelemetry>; PUBLISHERS] = std::array::from_fn(|_| Vec::new());
 
-            for (publisher, frame, avg_i16, totals, sequential, parallel, violations, trigger_vals) in ops {
+            for (publisher, frame, avg_i16, totals, sequential, parallel, rolling, violations, counts, trigger_vals) in ops {
                 let index = publisher % PUBLISHERS;
                 let average = (avg_i16 as f32).abs() / 100.0 + 0.001;
                 let telemetry = build_sample(
@@ -278,7 +305,9 @@ mod tests {
                     totals,
                     sequential,
                     parallel,
+                    rolling,
                     violations,
+                    counts,
                     trigger_vals,
                 );
 
@@ -289,10 +318,12 @@ mod tests {
                         .expect("change set after publish")
                         .clone(),
                 );
+                expectations[index].push(telemetry);
             }
 
             for (index, changes) in history.iter().enumerate() {
                 for (sequence_idx, change) in changes.iter().enumerate() {
+                    let expected_frame = &expectations[index][sequence_idx];
                     assert_eq!(change.sequence, (sequence_idx as u64) + 1, "publisher {} sequence mismatch", index);
                     assert_eq!(change.diffs.len(), 1);
                     let diff = &change.diffs[0];
@@ -303,6 +334,18 @@ mod tests {
                             let restored: FrameTelemetry = serde_json::from_slice(bytes)
                                 .expect("telemetry payload should deserialize");
                             assert_eq!(restored.stage_samples.len(), Stage::count());
+                            assert_eq!(restored.frame, expected_frame.frame);
+                            for (restored_sample, expected_sample) in restored
+                                .stage_samples
+                                .iter()
+                                .zip(expected_frame.stage_samples.iter())
+                            {
+                                assert_eq!(restored_sample.rolling_ms, expected_sample.rolling_ms);
+                                assert_eq!(
+                                    restored_sample.violation_count,
+                                    expected_sample.violation_count
+                                );
+                            }
                         }
                         other => panic!("expected update payload, got {:?}", other),
                     }
