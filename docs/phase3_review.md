@@ -23,7 +23,7 @@ Phase 3 of the Theta Network Protocol implementation delivers the ECS replicatio
 
 - **Registry Architecture**
   - `RegistryEntry` stores component key and dump function per registered type
-  - `Arc<ReplicationRegistry>` enables shared access across snapshot builder and delta tracker
+  - Registry passed as `&ReplicationRegistry` reference to builders/trackers (no `Arc` cloning needed)
   - Lazy iteration over entries during snapshot/delta operations (no upfront allocation)
 
 #### Test Coverage:
@@ -162,7 +162,7 @@ Phase 3 of the Theta Network Protocol implementation delivers the ECS replicatio
 3. `delta_tracker_multi_frame_consistency`
 
 ### Total Test Count (across all modules)
-- **45 tests passing** (11 replication unit + 3 replication integration + 31 existing tests from previous phases)
+- **55 tests passing** (49 unit + 6 integration spanning replication, telemetry, and command pipeline coverage)
 - **0 failures**
 - **0 ignored**
 
@@ -190,7 +190,7 @@ Phase 3 of the Theta Network Protocol implementation delivers the ECS replicatio
 ### Type Safety
 - ✅ **Trait Bounds:** `ReplicatedComponent` prevents non-serializable types from registration
 - ✅ **TypeId Deduplication:** Prevents accidental double-registration with conflicting dump logic
-- ✅ **Arc Sharing:** Immutable registry shared across builder and tracker (no mutation races)
+- ✅ **Reference-Based API:** Registry passed by reference to builders/trackers (no `Arc` cloning overhead)
 
 ### Determinism
 - ✅ **Component Iteration Order:** Follows ECS archetype insertion order (stable across peers with identical spawn sequences)

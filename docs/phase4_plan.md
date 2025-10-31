@@ -66,7 +66,7 @@ Introduce an authoritative, signed command log that merges concurrent editor act
 
 ## Status (Oct 31, 2025)
 - Foundation: ✅ Command log core with Lamport ordering, role enforcement, and Ed25519 hooks.
-- Integration: 🔄 Engine command pipeline emits selection highlight commands and produces network batches for broadcasting.
+- Integration: 🔄 Engine command pipeline emits selection highlight commands, routes batches into the new `CommandOutbox` ECS component, and is covered by integration tests.
 - Reliability: ⬜ Fuzz harness, replay helpers, and telemetry metrics remain pending.
 
 ## Follow-Up (Phase 4.1+)

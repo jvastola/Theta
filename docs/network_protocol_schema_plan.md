@@ -114,13 +114,15 @@
    - Add interest management system with spatial cell and tool scope filtering.
    - Wire replication events into ECS change buffers and validate deterministic convergence via loopback tests.
 
-   **Status (Oct 31, 2025):** Replication scaffolding landed in `network::replication` with JSON-backed snapshot chunking, delta tracking, and registry-driven component serialization. Phase plan captured in `docs/phase3_plan.md`; FlatBuffers encoding, interest filtering, and engine wiring scheduled next.
+   **Status (Oct 31, 2025):** ✅ Complete. Replication pipeline (`network::replication`) delivers chunked world snapshots and incremental deltas with registry-driven serialization (JSON placeholder). `WorldSnapshotBuilder` respects configurable MTU limits; `DeltaTracker` emits insert/update/remove diffs with deterministic ordering. Registry refactored to accept references instead of `Arc` clones. Phase 3 review captured in `docs/phase3_review.md` with 49 passing tests. FlatBuffers encoding and interest filtering remain as Phase 3.2 follow-up.
 
 4. **Phase 4 - Command Log & Conflict Resolution (Week 8-9)**
    - Layer CRDT-style command log with Lamport clocks and signature validation.
    - Implement conflict resolution strategies (last-writer-wins, merge, reject) per editor tool command type.
    - Add role-based permission checks at command validation layer.
    - Stand up protocol fuzz tests targeting command merge logic.
+
+   **Status (Oct 31, 2025):** 🔄 In Progress. Command log core (`network::command_log`) implemented with Lamport ordering, conflict strategies (LastWriteWins/Merge/Reject), role-based permissions, and Ed25519 signature hooks (behind `network-quic` feature). Engine integration (`engine::commands::CommandPipeline`) emits selection highlight commands through the log; new `editor::CommandOutbox` component stores network-ready batches and is covered by integration tests. `NetworkSession::craft_command_batch` packages entries for broadcast. Remaining: fuzz harness, replay helpers, and metrics integration. Phase plan in `docs/phase4_plan.md`.
 
 5. **Phase 5 - Editor Collaboration & Assets (Week 10-11)**
    - Extend schema with `EditorEvent` messages for tool activations, selection highlights, and gizmo transforms.

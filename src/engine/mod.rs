@@ -3,6 +3,7 @@ pub mod schedule;
 
 use self::commands::CommandPipeline;
 use crate::ecs::World;
+use crate::editor::CommandOutbox;
 use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
 use crate::network::EntityHandle;
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
@@ -25,6 +26,7 @@ pub struct Engine {
     max_frames: u32,
     frame_stats_entity: Option<crate::ecs::Entity>,
     telemetry_entity: Option<crate::ecs::Entity>,
+    command_entity: Option<crate::ecs::Entity>,
     input_provider: Arc<Mutex<Box<dyn VrInputProvider>>>,
     command_pipeline: Arc<Mutex<CommandPipeline>>,
 }
@@ -51,6 +53,7 @@ impl Engine {
             max_frames: DEFAULT_MAX_FRAMES,
             frame_stats_entity: None,
             telemetry_entity: None,
+            command_entity: None,
             input_provider,
             command_pipeline,
         };
@@ -134,6 +137,7 @@ impl Engine {
             world.register_component::<ControllerState>();
             world.register_component::<TelemetrySurface>();
             world.register_component::<TelemetryReplicator>();
+            world.register_component::<CommandOutbox>();
         }
 
         let stats_entity = {
@@ -172,6 +176,13 @@ impl Engine {
             let world = self.scheduler.world_mut();
             initialize_editor_state(world, actor_entity)
         };
+        self.command_entity = Some(editor_entity);
+        {
+            let world = self.scheduler.world_mut();
+            world
+                .insert(editor_entity, CommandOutbox::default())
+                .expect("command outbox component should insert");
+        }
 
         let input_source = Arc::clone(&self.input_provider);
         self.add_system_fn(Stage::Simulation, "update_vr_input", move |world, delta| {
@@ -559,15 +570,32 @@ impl Engine {
         }
 
         if let Ok(mut pipeline) = self.command_pipeline.lock() {
-            for batch in pipeline.drain_batches() {
-                println!(
-                    "[commands] batch {} entries {}",
-                    batch.sequence,
-                    batch.entries.len()
-                );
+            let drained = pipeline.drain_batches();
+            if !drained.is_empty() {
+                for batch in &drained {
+                    println!(
+                        "[commands] batch {} entries {}",
+                        batch.sequence,
+                        batch.entries.len()
+                    );
+                }
+
+                if let Some(entity) = self.command_entity {
+                    if let Some(outbox) =
+                        self.scheduler.world_mut().get_mut::<CommandOutbox>(entity)
+                    {
+                        outbox.ingest(drained);
+                    }
+                }
             }
         }
     }
 }
 
-crate::register_component_types!(FrameStats, Transform, Velocity, EditorSelection);
+crate::register_component_types!(
+    FrameStats,
+    Transform,
+    Velocity,
+    EditorSelection,
+    CommandOutbox
+);

@@ -4,7 +4,7 @@ pub use telemetry::{
     FrameTelemetry, StageSample, TelemetryOverlay, TelemetryReplicator, TelemetrySurface,
 };
 pub mod commands;
-pub use commands::{CMD_SELECTION_HIGHLIGHT, SelectionHighlightCommand};
+pub use commands::{CMD_SELECTION_HIGHLIGHT, CommandOutbox, SelectionHighlightCommand};
 
 pub struct MeshEditor {
     telemetry_overlay: TelemetryOverlay,
