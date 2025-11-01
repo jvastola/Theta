@@ -149,38 +149,40 @@ Define the foundational architecture for the Theta Engine VR-first game engine a
 - **Deltas:** Three-way diffing (Insert/Update/Remove), descriptor advertisement
 - **Tests:** 11 unit tests + 3 integration tests (59 total across all modules)
 
-#### Phase 4: Command Log & Conflict Resolution (75% Complete)
-- **Core:** ✅ Lamport ordering, role enforcement, conflict strategies
-- **Signatures:** ✅ Ed25519 signing/verification, trait-based abstractions
-- **Integration:** ✅ CommandPipeline, CommandOutbox, CommandTransportQueue wired
-- **Pending:** 🔄 QUIC broadcast, receive pipeline, command metrics, additional editor commands
+#### Phase 4: Command Log & Conflict Resolution (✅ Complete)
+- **Core:** Lamport ordering, role enforcement, conflict strategies delivered
+- **Signatures:** Ed25519 signing/verification in place with pluggable traits
+- **Integration:** CommandPipeline, Outbox, TransportQueue, QUIC send/receive, remote apply
+- **Telemetry:** Command metrics surfaced in overlay + diagnostics; extended editor command vocabulary landed
 
-### 🔄 Current Sprint (Nov 1-7, 2025): Phase 4 Completion
+### 🔄 Current Sprint (Nov 1-14, 2025): Phase 5 Kickoff – Production Hardening
 
-#### Week 9 Deliverables:
-1. **Transport Broadcast (Nov 1-3)**
-   - Wire CommandTransportQueue into QUIC control stream
-   - Implement send/receive command packet functions
-   - Loopback validation tests
+#### Sprint Objectives
+1. **Security & Integrity**
+   - Implement nonce-based replay protection in `CommandPacket`
+   - Add per-author token bucket rate limiting and queue depth alerting
+   - Introduce payload size guards (64 KB) with telemetry reporting
 
-2. **Metrics & Telemetry (Nov 4-5)**
-   - Command append rate, conflict counts, queue depth
-   - Telemetry overlay integration
-   - TransportDiagnostics extension
+2. **Transport Resilience**
+   - Prototype WebRTC data-channel fallback path
+   - Establish automated QUIC/WebRTC loopback convergence tests
 
-3. **Additional Commands (Nov 6-7)**
-   - Transform gizmo commands (translate, rotate, scale)
-   - Tool state commands (activate, deactivate)
-   - Mesh editing command skeleton
+3. **Performance & Compression**
+   - Integrate Zstd compression for commands (target ≥50% reduction)
+   - Stand up nightly performance benchmarks with telemetry export
+
+4. **Documentation & Protocol**
+   - Publish editor command protocol schema (Phase 4 carryover)
+   - Update architecture diagrams to reflect new telemetry surfaces
 
 ### 📋 Upcoming Sprints (Nov-Dec 2025)
 
-#### Phase 5: Production Hardening (Nov 8-28)
-- WebRTC data channel fallback for browser peers
-- Zstd compression integration (50-70% reduction target)
-- Interest management implementation (spatial cells, tool scopes)
-- Loopback convergence suite (120-frame simulation)
-- Performance benchmarking and baseline establishment
+#### Phase 5: Production Hardening (Nov 1-28)
+- Security: Command replay protection, rate limiting, payload guards
+- Transport: WebRTC fallback, convergence suite, automated soak tests
+- Performance: Zstd compression, telemetry export, benchmarking harness
+- Docs: Editor command protocol schema, updated diagrams, operator runbooks
+- Detailed parallel assignments: see `docs/phase5_parallel_plan.md`
 
 #### Phase 6: Mesh Editor Alpha (Nov 29 - Dec 19)
 - Half-edge mesh data model with boundary tracking
@@ -196,8 +198,8 @@ Define the foundational architecture for the Theta Engine VR-first game engine a
 - Quest 3 APK build pipeline (<200 MB, 72 Hz baseline)
 
 ### Current Metrics (Oct 31, 2025)
-- **Tests Passing:** 59 (53 unit + 6 integration)
+- **Tests Passing:** 66 (61 unit/integration baseline + 5 new Phase 4 tests)
 - **Test Failures:** 0
-- **Phase 4 Completion:** 75%
+- **Phase 4 Completion:** 100%
 - **Lines of Code:** ~8,500 (src + tests)
 - **Feature Coverage:** Core ECS, networking, telemetry complete; mesh editor pending
