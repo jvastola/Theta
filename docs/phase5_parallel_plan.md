@@ -33,11 +33,24 @@
 - [ ] Enforce 64 KB payload cap in transport receive; emit diagnostics and drop oversize packets.
 - [ ] Extend tests: replay rejection, limiter saturation, oversize payload handling.
 
+#### Test Suite Enhancements (Networking & Security)
+- [ ] **Replay Protection:** Add unit and integration tests for nonce-based replay rejection, including edge cases (wraparound, duplicate, out-of-order nonces).
+- [ ] **Rate Limiting:** Simulate burst and sustained command floods; assert limiter triggers, telemetry alerts, and correct rejection behavior.
+- [ ] **Payload Guard:** Fuzz oversized and malformed payloads; verify diagnostics, safe drops, and no panics.
+- [ ] **Signature Verification:** Negative-path tests for invalid, missing, or tampered signatures.
+- [ ] **CI Enforcement:** All new security features require passing tests before merge (CI gate).
+
 ### Systems & Telemetry
 - [ ] Implement Zstd compression adapter with heuristics for small payload bypass.
 - [ ] Capture compression ratio, compression/decompression latency in telemetry overlay.
 - [ ] Stand up nightly perf benchmark (command append flood, remote apply, telemetry export).
 - [ ] Ship telemetry export job writing CSV into `target/metrics/` for CI artifact capture.
+
+#### Test Suite Enhancements (Systems & Telemetry)
+- [ ] **Compression:** Add regression tests for compression ratio, latency, and bypass threshold logic. Validate decompression correctness and error handling.
+- [ ] **Benchmarking:** Automate performance benchmarks (command throughput, latency, memory) with trend tracking and failure alerts.
+- [ ] **Telemetry Export:** Test CSV/Parquet export jobs for schema correctness and artifact presence in CI.
+- [ ] **Metrics Coverage:** Ensure all new telemetry fields have corresponding test assertions.
 
 ### Editor Tools
 - [ ] Author `docs/editor_command_protocol.md` (schema, payload examples, conflict strategies).
@@ -45,11 +58,22 @@
 - [ ] Define PolySketch mesh pipeline requirements (half-edge data shape, undo stack expectations) ahead of Phase 6.
 - [ ] Coordinate with Systems team on telemetry hooks needed for tool UX (queue depth warnings, conflict prompts).
 
+#### Test Suite Enhancements (Editor Tools)
+- [ ] **Protocol Schema:** Validate all documented command payloads with roundtrip (serialize/deserialize) tests.
+- [ ] **Tool Matrix:** Add integration tests for each tool command, asserting ECS state changes and telemetry hooks.
+- [ ] **Mesh Pipeline:** Skeleton tests for mesh command payloads, undo/redo stack, and error handling.
+- [ ] **QA Automation:** Link tool matrix to automated test coverage reports for sign-off.
+
 ### Platform / Infra
 - [ ] Update architecture diagrams (transport, telemetry, command flow) to reflect Phase 5 changes.
 - [ ] Add CI task for nightly soak tests (QUIC + WebRTC) with trend reporting.
 - [ ] Publish operator runbook detailing mitigation steps for rate-limit triggers and replay alarms.
 - [ ] Ensure documentation site aggregates new specs (command protocol, telemetry reference, roadmap).
+
+#### Test Suite Enhancements (Platform / Infra)
+- [ ] **CI & Soak Tests:** Automate nightly soak tests for all supported transports (QUIC, WebRTC); report failures and trends to dashboard.
+- [ ] **Operator Runbook:** Validate all documented mitigation steps with scripted incident simulations.
+- [ ] **Documentation Coverage:** Add CI check to ensure all new features have corresponding doc/test references before merge.
 
 ## Updated Roadmap (Oct 31 Snapshot)
 
