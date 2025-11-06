@@ -298,7 +298,7 @@ impl TelemetryOverlay {
 mod tests {
     use super::*;
     use crate::network::command_log::ConflictStrategy;
-    use crate::network::{ChangeSet, DiffPayload};
+    use crate::network::{ChangeSet, DiffPayload, TransportDiagnostics, TransportKind};
     use proptest::prelude::*;
 
     struct StageSeries {
@@ -469,6 +469,26 @@ mod tests {
         assert!(panel.contains("queue 4"));
         assert!(panel.contains("Conflicts"));
         assert!(panel.contains("Guards rate-limit 2 replay 1 payload 0"));
+    }
+
+    #[test]
+    fn telemetry_overlay_includes_transport_kind_and_metrics() {
+        let mut overlay = TelemetryOverlay::default();
+        let mut metrics = TransportDiagnostics::default();
+        metrics.kind = TransportKind::WebRtc;
+        metrics.rtt_ms = 4.1;
+        metrics.jitter_ms = 0.16;
+        metrics.packets_sent = 32;
+        metrics.packets_received = 30;
+        metrics.compression_ratio = 1.0;
+
+        let sample = static_sample(5).with_transport_metrics(Some(metrics));
+
+        overlay.ingest(sample);
+        let panel = overlay.text_panel().expect("panel text");
+        assert!(panel.contains("Network"));
+        assert!(panel.contains("WebRtc"));
+        assert!(panel.contains("32/30"));
     }
 
     proptest::prop_compose! {

@@ -5,7 +5,7 @@
 
 ## Overview
 
-This document summarizes all completed work on the Theta Engine VR project through November 5, 2025. The project has successfully completed Phases 1-4 with strong test coverage (73 tests passing, 0 failures) and production-ready foundations for ECS, networking, telemetry, and the collaborative command pipeline.
+This document summarizes all completed work on the Theta Engine VR project through November 5, 2025. The project has successfully completed Phases 1-4 with strong test coverage (74 tests passing, 0 failures) and production-ready foundations for ECS, networking, telemetry, and the collaborative command pipeline.
 
 ---
 
@@ -177,14 +177,14 @@ This document summarizes all completed work on the Theta Engine VR project throu
 2. `large_world_snapshot_chunking`: 100 entities with 512-byte chunks
 3. `delta_tracker_multi_frame_consistency`: 5-frame sequence (spawn, nop, update, add component, despawn)
 
-**Total Test Count:** 73 tests (pre-Phase 4 baseline 61 + 12 new command/security tests)
+**Total Test Count:** 74 tests (pre-Phase 4 baseline 61 + 13 new command/transport/telemetry/security tests)
 
 ---
 
 ## ✅ Phase 4: Command Log & Conflict Resolution (100% Complete)
 
 **Completion Date:** October 31, 2025  
-**Test Coverage Added:** 5 new tests (total now 66)
+**Test Coverage Added:** 5 new tests (Phase 4 total 66; cumulative total now 74 after Phase 5 transport/telemetry additions)
 
 ### Highlights
 
@@ -212,8 +212,8 @@ This document summarizes all completed work on the Theta Engine VR project throu
 
 ### Test Coverage (November 2025):
 ```
-Total Tests:              66
-Passing:                  66
+Total Tests:              74
+Passing:                  74
 Failing:                   0
 Ignored:                   0
 
@@ -227,6 +227,8 @@ Breakdown (by focus area):
   VR & Rendering:          6 tests
   Integration Suites:      6 tests
 ```
+
+Running `cargo test --features network-quic` exercises 12 additional transport-specific unit tests, raising the aggregate total to 86.
 
 ### Code Statistics:
 ```
@@ -311,7 +313,7 @@ Dev Dependencies:
 1. ✅ **Schema Evolution:** FlatBuffers versioning + CI validation prevents breakage
 2. ✅ **Network Fragmentation:** Chunked snapshots + length-prefixed frames handle MTU limits
 3. ✅ **Command Conflicts:** Explicit strategies (LastWriteWins, Merge, Reject) provide determinism
-4. ✅ **Test Coverage:** 73 tests with 100% pass rate validates correctness
+4. ✅ **Test Coverage:** 74 tests with 100% pass rate validates correctness
 
 ### Active Risks (Being Addressed):
 1. 🔄 **Quest 3 Performance:** GPU profiling hooks in place; optimization in Phase 7
@@ -377,7 +379,7 @@ The project is **transitioning into Phase 5 (Production Hardening)** and remains
 
 **Total Effort to Date:** ~9 weeks (7 weeks full-time equivalent)  
 **Lines of Code:** ~8,500 source + ~2,500 test = ~11,000 total  
-**Test Coverage:** 73 tests, 100% pass rate  
+**Test Coverage:** 74 tests, 100% pass rate  
 **Project Health:** Green (Phase 5 pre-work underway)
 
 ---

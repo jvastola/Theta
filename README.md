@@ -2,22 +2,23 @@
 
 Theta Engine is a Rust-native VR-first game engine & mesh authoring platform focused on high-performance rendering, ergonomic mesh tools, and networked collaboration. This repository contains architecture, scaffolding, and tests for the engine and editor runtime.
 
-## Current Status (October 31, 2025)
+## Current Status (November 5, 2025)
 
-**Phase 4 Progress:** 75% Complete (Command Log & Conflict Resolution)
+**Phase 4:** Complete (Command Log & Conflict Resolution)  
+**Phase 5:** In Flight (Production Hardening & Transport Resilience)
 
 ### ✅ Completed Phases:
 - **Phase 1 (Foundation):** ECS core, renderer, VR integration, FlatBuffers schema
 - **Phase 2 (Transport):** QUIC handshake, heartbeat diagnostics, Ed25519 key exchange
 - **Phase 3 (Replication):** Snapshot streaming, delta tracking, component serialization
-- **Phase 4 (75%):** Command log core, signatures, outbox/queue wiring
+- **Phase 4:** Command log core, signatures, outbox/queue wiring, telemetry integration
 
-### 🔄 In Progress (Nov 1-7):
-- QUIC command broadcast & receive pipeline
-- Command metrics & telemetry integration
-- Transform gizmo and tool state commands
+### 🔄 In Progress (Nov 8-21):
+- Security hardening: nonce replay protection, token-bucket rate limiting, payload guards
+- Transport resilience: WebRTC command transport fallback, mixed QUIC/WebRTC convergence tests
+- Compression & telemetry: Zstd benchmarking, transport diagnostics surfacing active transport kind
 
-**Metrics:** 59 tests passing (53 unit + 6 integration), 0 failures, ~11,000 LOC total
+**Metrics:** 74 tests passing (68 unit + 6 integration), 0 failures, ~11,000 LOC total — 86 tests when running `cargo test --features network-quic`
 
 ## Vision
 - VR-native editor inspired by PolySketch/Google Blocks with intuitive mesh creation, duplication, and undo/redo.
@@ -43,13 +44,6 @@ Each subsystem will be designed as a distinct module crate to allow modular deve
 - QUIC transport (`network-quic`) establishes Ed25519-backed handshakes with heartbeat telemetry feeding frame diagnostics.
 
 ## Immediate Roadmap (November 2025)
-
-### Week 9 (Nov 1-7): Complete Phase 4
-- Wire CommandTransportQueue into QUIC control stream for command broadcasting
-- Implement receive pipeline with signature verification and ECS integration
-- Add command metrics (append rate, conflicts, queue depth) to telemetry overlay
-- Implement transform gizmo commands and tool state tracking
-- **Target:** 67 tests passing, loopback convergence validated
 
 ### Weeks 10-12 (Nov 8-28): Phase 5 - Production Hardening
 - WebRTC data channel fallback for browser-based VR peers

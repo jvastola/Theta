@@ -202,8 +202,8 @@ Define the foundational architecture for the Theta Engine VR-first game engine a
 - Haptic feedback and comfort settings
 - Quest 3 APK build pipeline (<200 MB, 72 Hz baseline)
 
-### Current Metrics (Oct 31, 2025)
-- **Tests Passing:** 66 (61 unit/integration baseline + 5 new Phase 4 tests)
+### Current Metrics (Nov 5, 2025)
+- **Tests Passing:** 74 (68 unit + 6 integration; Phase 4 + Phase 5 transport/telemetry extensions validated). Enabling `network-quic` runs 12 additional transport tests (86 total).
 - **Test Failures:** 0
 - **Phase 4 Completion:** 100%
 - **Lines of Code:** ~8,500 (src + tests)

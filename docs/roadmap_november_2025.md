@@ -11,8 +11,8 @@
 - Command metrics (append rate, conflict counts, queue depth, signature verification latency) surface through the telemetry overlay and `TransportDiagnostics` snapshots.
 
 ### Test Impact
-- Added 5 new tests (3 unit, 2 integration) covering transport round-trips, Lamport advancement, remote apply, and command serialization.
-- **Current total:** 71 tests passing (≥ Phase 4 exit criteria of 65).
+- Added 6 new tests (4 unit, 2 integration) covering transport round-trips, Lamport advancement, remote apply, mesh command serialization, WebRTC fallback packet delivery, and telemetry transport diagnostics rendering.
+- **Current total:** 74 tests passing (≥ Phase 4 exit criteria of 65).
 
 ### Transition Notes
 - Phase 5 inherits security and resilience follow-ups: nonce-based replay protection, rate limiting, and Zstd compression.
@@ -337,7 +337,7 @@
 ## Success Metrics & KPIs
 
 ### Current Status (Phase 4):
-- ✅ 71 tests passing (10 new tests landed across command and security suites)
+- ✅ 74 tests passing (11 new tests landed across command, transport, telemetry, and security suites)
 - ✅ Command packets broadcast and received over QUIC replication stream
 - ✅ Telemetry overlay surfaces command metrics (rate, conflicts, latency)
 - ✅ Loopback convergence validated with mixed local/remote command streams
@@ -406,16 +406,17 @@
 
 ### Current Test Count (Nov 5, 2025):
 ```
-Unit Tests:                       58 passed
-Integration Tests:                 8 passed
-  - command_pipeline_integration: 3 passed
+Unit Tests:                       68 passed
+Integration Tests:                 6 passed
+  - command_pipeline_integration: 2 passed
   - replication_integration:      3 passed
   - telemetry_integration:        1 passed
-  - transport_loopback:           1 passed
 
-Total:                            66 passed
+Total:                            74 passed
 Failures:                          0
 Ignored:                           0
+
+Note: Running `cargo test --features network-quic` adds 12 transport-focused unit tests, bringing the aggregate total to 86.
 ```
 
 ### Test Coverage by Focus Area:

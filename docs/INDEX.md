@@ -15,7 +15,7 @@
 - **[Phase 4 Status](phase4_status.md)** - Command Log implementation wrap-up (✅ 100% complete)
 - **Current Focus:** Phase 5 kickoff (Security hardening, transport resilience, compression)
 - **Active Work:** Nonce-based replay protection, WebRTC data-channel prototype, Zstd compression integration
-- **Tests:** 66 passing, 0 failures
+- **Tests:** 74 passing, 0 failures
 
 ### 📖 Phase Documentation
 
@@ -53,9 +53,10 @@
 - **[Network FlatBuffers Schema](../schemas/network.fbs)** - Network protocol message definitions
 
 ### 🔬 Testing & Quality
-- **Test Coverage:** 71 tests (100% pass rate)
-  - Unit tests: 53 (ECS, scheduler, command log, replication, etc.)
+- **Test Coverage:** 74 tests (100% pass rate)
+  - Unit tests: 68 (ECS, scheduler, command log, transport, telemetry, VR)
   - Integration tests: 6 (command pipeline, replication, telemetry)
+- Feature flag note: `cargo test --features network-quic` adds 12 transport-focused unit tests (86 total).
 - **CI Pipeline:** cargo fmt, clippy, tests, schema validation
 
 ### 🚀 Development Workflow

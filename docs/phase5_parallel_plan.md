@@ -5,7 +5,7 @@
 **Audience:** Networking, Systems, Editor, Platform/Infra teams
 
 ## Context
-- Phase 4 (Command Log & Conflict Resolution) is complete. Metrics, telemetry, and extended editor command vocabulary are merged and validated (71 tests passing).
+- Phase 4 (Command Log & Conflict Resolution) is complete. Metrics, telemetry, and extended editor command vocabulary are merged and validated (74 tests passing as of Nov 5).
 - Phase 5 objectives focus on production hardening: securing the command pipeline, strengthening transports, adding performance instrumentation, and preparing documentation for broader team onboarding.
 - The roadmap accelerates into overlapping workstreams so that Networking/Security, Systems/Telemetry, Editor Tools, and Platform/Infra can execute in parallel while sharing common integration checkpoints.
 

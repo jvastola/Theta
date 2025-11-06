@@ -13,7 +13,7 @@
 | Phase 4 | Command Log & Conflict Resolution | ✅ Complete | Lamport-ordered command log, signed command pipeline, QUIC command transport, telemetry metrics |
 | Phase 5 | Production Hardening | 🚧 In Flight | Security hardening, WebRTC fallback, compression, interest management |
 
-**Test Coverage:** 73 tests passing (67 unit + 6 integration)  
+**Test Coverage:** 74 tests passing (68 unit + 6 integration)  
 **Build Status:** `cargo build` and `cargo test` (with `network-quic`) passing  
 **Feature Flags:** `render-wgpu`, `vr-openxr`, `network-quic` validated in CI
 
@@ -34,7 +34,7 @@
 - Reference plan: `docs/phase5_parallel_plan.md` (parallel work streams and owners).
 
 ## Metrics & Telemetry
-- **Tests:** 73 passing (no failures, no ignored). Integration suites cover replication, command pipeline, telemetry, and transport loopback.
+- **Tests:** 74 passing (no failures, no ignored). Integration suites cover replication, command pipeline, telemetry, and transport loopback. Enabling `network-quic` adds 12 transport-specific unit tests for a total of 86.
 - **Performance Instrumentation:** Command metrics now include payload guard drops; transport diagnostics tag the active transport (`Quic` or `WebRtc`) and surface in the overlay for operator awareness.
 - **Codebase Footprint:** ~8,500 source LOC + ~2,700 test LOC (per `COMPLETION_SUMMARY.md`).
 
@@ -53,9 +53,9 @@
 
 ## Recent Resolutions
 - **Phase 4 Status Unified:** All docs now report Phase 4 as complete (previously inconsistently marked 75% complete in `COMPLETION_SUMMARY.md`, `INDEX.md`, and `roadmap_november_2025.md`).
-- **Test Count Aligned:** Repository-wide totals now reflect 71 tests across completion summary, roadmap, and index (previous counts lagged at 66).
+- **Test Count Aligned:** Repository-wide totals now reflect 74 tests (68 unit + 6 integration) across completion summary, roadmap, and index (previous counts lagged at 66).
 - **Live Doc Paths:** Index navigation now points to archived Phase 2/3 documents and the new unified status overview.
-- **Command Log Security Scaffolding:** Added `CommandLogConfig` with rate limiter and replay tracker defaults plus guard telemetry counters, increasing automated tests to 71.
+- **Command Log Security Scaffolding:** Added `CommandLogConfig` with rate limiter and replay tracker defaults plus guard telemetry counters, increasing automated tests to 74.
 
 ## Next Checkpoints
 - **Nov 8-14, 2025:** Phase 5 security hardening sprint (nonce replay guard, rate limiting prototype).
