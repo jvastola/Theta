@@ -72,7 +72,7 @@ impl VoiceCodec for PassthroughCodec {
     }
 
     fn decode(&mut self, encoded: &[u8]) -> Result<Vec<i16>, VoiceCodecError> {
-        if encoded.len() % 2 != 0 {
+        if !encoded.len().is_multiple_of(2) {
             return Err(VoiceCodecError(
                 "encoded payload length must be even".into(),
             ));
@@ -509,7 +509,7 @@ mod tests {
         let mut codec = OpusCodec::mono().expect("create opus codec");
         let sample_count = codec.expected_samples();
         let samples: Vec<i16> = (0..sample_count)
-            .map(|idx| ((idx as i32 * 127).wrapping_sub(5_000) as i16))
+            .map(|idx| (idx as i32 * 127).wrapping_sub(5_000) as i16)
             .collect();
 
         let encoded = codec.encode(&samples).expect("encode opus frame");

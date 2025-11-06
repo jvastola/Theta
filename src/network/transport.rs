@@ -897,10 +897,10 @@ impl WebRtcTransport {
         if let Err(err) = self.command_channel.close().await {
             log::warn!("[transport] failed to close WebRTC data channel: {err}");
         }
-        if let Some(channel) = &self.voice_channel {
-            if let Err(err) = channel.close().await {
-                log::warn!("[transport] failed to close WebRTC voice channel: {err}");
-            }
+        if let Some(channel) = &self.voice_channel
+            && let Err(err) = channel.close().await
+        {
+            log::warn!("[transport] failed to close WebRTC voice channel: {err}");
         }
         if let Err(err) = self.peer.close().await {
             log::warn!("[transport] failed to close WebRTC peer connection: {err}");
@@ -1112,6 +1112,13 @@ impl CommandTransport {
         match self {
             CommandTransport::Quic(session) => session.metrics_handle(),
             CommandTransport::WebRtc(transport) => transport.metrics_handle(),
+        }
+    }
+
+    pub fn voice_metrics_handle(&self) -> Option<VoiceDiagnosticsHandle> {
+        match self {
+            CommandTransport::Quic(_) => None,
+            CommandTransport::WebRtc(transport) => transport.voice_metrics_handle(),
         }
     }
 

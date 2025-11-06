@@ -45,8 +45,6 @@ use std::env;
 use std::net::{IpAddr, SocketAddr};
 #[cfg(feature = "network-quic")]
 use std::process;
-#[cfg(feature = "network-quic")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "network-quic")]
 use std::time::Duration;
@@ -146,6 +144,8 @@ pub struct Engine {
     #[cfg(feature = "network-quic")]
     webrtc_event_rx: UnboundedReceiver<WebRtcRuntimeEvent>,
     #[cfg(feature = "network-quic")]
+    webrtc_channel_bundles: Arc<Mutex<HashMap<PeerId, WebRtcChannelBundle>>>,
+    #[cfg(feature = "network-quic")]
     active_webrtc_peer: Option<PeerId>,
     #[cfg(feature = "network-quic")]
     webrtc_ice_servers: Vec<IceServerConfig>,
@@ -202,6 +202,8 @@ impl Engine {
             webrtc_event_tx,
             #[cfg(feature = "network-quic")]
             webrtc_event_rx,
+            #[cfg(feature = "network-quic")]
+            webrtc_channel_bundles: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "network-quic")]
             active_webrtc_peer: None,
             #[cfg(feature = "network-quic")]
@@ -899,12 +901,14 @@ impl Engine {
         let event_tx_for_channel = self.webrtc_event_tx.clone();
         let connection_for_channel = Arc::clone(connection);
         let peer_for_channel = peer_id.clone();
+        let bundles_for_channel = Arc::clone(&self.webrtc_channel_bundles);
         connection.on_data_channel(Box::new(move |channel: Arc<RTCDataChannel>| {
             let event_tx = event_tx_for_channel.clone();
             let peer = peer_for_channel.clone();
             let connection = Arc::clone(&connection_for_channel);
+            let bundles = Arc::clone(&bundles_for_channel);
             Box::pin(async move {
-                hook_transport_emitter(&event_tx, peer, connection, channel);
+                hook_transport_emitter(&event_tx, peer, connection, channel, bundles);
             })
         }));
 
@@ -920,25 +924,52 @@ impl Engine {
             .unwrap_or(false);
 
         if needs_data_channel {
-            let runtime = self.ensure_network_runtime();
-            let channel = runtime
-                .block_on(async {
-                    connection
-                        .create_data_channel(
-                            "theta-command",
-                            Some(RTCDataChannelInit {
-                                ordered: Some(true),
-                                ..Default::default()
-                            }),
-                        )
-                        .await
-                })
-                .map_err(|err| err.to_string())?;
+            let command_channel = {
+                let runtime = self.ensure_network_runtime();
+                runtime
+                    .block_on(async {
+                        connection
+                            .create_data_channel(
+                                "theta-command",
+                                Some(RTCDataChannelInit {
+                                    ordered: Some(true),
+                                    ..Default::default()
+                                }),
+                            )
+                            .await
+                    })
+                    .map_err(|err| err.to_string())?
+            };
             hook_transport_emitter(
                 &self.webrtc_event_tx,
                 peer_id.clone(),
                 Arc::clone(&connection),
-                channel,
+                command_channel,
+                Arc::clone(&self.webrtc_channel_bundles),
+            );
+
+            let voice_channel = {
+                let runtime = self.ensure_network_runtime();
+                runtime
+                    .block_on(async {
+                        connection
+                            .create_data_channel(
+                                "theta-voice",
+                                Some(RTCDataChannelInit {
+                                    ordered: Some(false),
+                                    ..Default::default()
+                                }),
+                            )
+                            .await
+                    })
+                    .map_err(|err| err.to_string())?
+            };
+            hook_transport_emitter(
+                &self.webrtc_event_tx,
+                peer_id.clone(),
+                Arc::clone(&connection),
+                voice_channel,
+                Arc::clone(&self.webrtc_channel_bundles),
             );
             if let Some(entry) = self.webrtc_peers.get_mut(peer_id) {
                 entry.has_local_data_channel = true;
@@ -1352,10 +1383,17 @@ impl Engine {
             active_transport: None,
             fallback_available: self.command_transport_fallback.is_some(),
             peers: Vec::new(),
+            voice: None,
         };
 
         if let Some(transport) = self.command_transport.as_ref() {
             telemetry.active_transport = Some(format!("{:?}", transport.kind()));
+        }
+
+        if let Some(CommandTransport::WebRtc(transport)) = self.command_transport.as_ref() {
+            telemetry.voice = transport
+                .voice_metrics_handle()
+                .and_then(|handle| handle.snapshot());
         }
 
         if self.webrtc_peers.is_empty()
@@ -1656,6 +1694,9 @@ impl Engine {
 
     fn cleanup_peer_connection(&mut self, peer_id: PeerId) {
         let label = peer_id.0.clone();
+        if let Ok(mut bundles) = self.webrtc_channel_bundles.lock() {
+            bundles.remove(&peer_id);
+        }
         match self.webrtc_peers.remove(&peer_id) {
             Some(mut entry) => {
                 entry.state = WebRtcConnectionPhase::Closing;
@@ -1728,6 +1769,65 @@ enum WebRtcRuntimeEvent {
 }
 
 #[cfg(feature = "network-quic")]
+#[derive(Default)]
+struct WebRtcChannelBundle {
+    command: Option<Arc<RTCDataChannel>>,
+    voice: Option<Arc<RTCDataChannel>>,
+    emitted: bool,
+}
+
+#[cfg(feature = "network-quic")]
+fn try_promote_webrtc_transport(
+    bundles: &Arc<Mutex<HashMap<PeerId, WebRtcChannelBundle>>>,
+    peer_id: &PeerId,
+    label: &str,
+    channel: Arc<RTCDataChannel>,
+) -> Option<(Arc<RTCDataChannel>, Arc<RTCDataChannel>)> {
+    let mut bundles = match bundles.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::error!(
+                "[webrtc] channel bundle lock poisoned while processing {}",
+                peer_id.0
+            );
+            poisoned.into_inner()
+        }
+    };
+
+    let bundle = bundles.entry(peer_id.clone()).or_default();
+
+    match label {
+        "theta-command" => {
+            bundle.command = Some(Arc::clone(&channel));
+        }
+        "theta-voice" => {
+            bundle.voice = Some(Arc::clone(&channel));
+        }
+        other => {
+            log::warn!(
+                "[webrtc] ignoring unexpected data channel '{}' for peer {}",
+                other,
+                peer_id.0
+            );
+            return None;
+        }
+    }
+
+    if bundle.emitted {
+        return None;
+    }
+
+    if let (Some(command), Some(voice)) = (&bundle.command, &bundle.voice) {
+        bundle.emitted = true;
+        let result = (Arc::clone(command), Arc::clone(voice));
+        bundles.remove(peer_id);
+        return Some(result);
+    }
+
+    None
+}
+
+#[cfg(feature = "network-quic")]
 #[derive(Debug)]
 struct WebRtcPeerEntry {
     connection: Option<Arc<RTCPeerConnection>>,
@@ -1784,12 +1884,14 @@ fn hook_transport_emitter(
     peer_id: PeerId,
     connection: Arc<RTCPeerConnection>,
     channel: Arc<RTCDataChannel>,
+    bundles: Arc<Mutex<HashMap<PeerId, WebRtcChannelBundle>>>,
 ) {
-    let emission_guard = Arc::new(AtomicBool::new(false));
+    let channel_label = channel.label().to_string();
+    let label_for_closure = channel_label.clone();
     let event_tx_on_open = event_tx.clone();
     let connection_on_open = Arc::clone(&connection);
     let channel_on_open = Arc::clone(&channel);
-    let guard_on_open = Arc::clone(&emission_guard);
+    let bundles_on_open = Arc::clone(&bundles);
     let peer_on_open = peer_id.clone();
 
     channel.on_open(Box::new(move || {
@@ -1797,36 +1899,41 @@ fn hook_transport_emitter(
         let peer_id = peer_on_open.clone();
         let connection = Arc::clone(&connection_on_open);
         let channel = Arc::clone(&channel_on_open);
-        let guard = Arc::clone(&guard_on_open);
+        let bundles = Arc::clone(&bundles_on_open);
+        let label = label_for_closure.clone();
         Box::pin(async move {
-            if guard
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
+            if let Some((command_channel, voice_channel)) =
+                try_promote_webrtc_transport(&bundles, &peer_id, label.as_str(), channel)
             {
-                return;
+                let transport =
+                    WebRtcTransport::from_parts(connection, command_channel, Some(voice_channel));
+                if event_tx
+                    .send(WebRtcRuntimeEvent::TransportEstablished { peer_id, transport })
+                    .is_err()
+                {
+                    log::warn!("[webrtc] transport event dropped; engine likely shutting down");
+                }
             }
+        })
+    }));
 
-            let transport = WebRtcTransport::from_parts(connection, channel, None);
+    if channel.ready_state() == RTCDataChannelState::Open {
+        if let Some((command_channel, voice_channel)) =
+            try_promote_webrtc_transport(
+                &bundles,
+                &peer_id,
+                channel_label.as_str(),
+                Arc::clone(&channel),
+            )
+        {
+            let transport =
+                WebRtcTransport::from_parts(connection, command_channel, Some(voice_channel));
             if event_tx
                 .send(WebRtcRuntimeEvent::TransportEstablished { peer_id, transport })
                 .is_err()
             {
                 log::warn!("[webrtc] transport event dropped; engine likely shutting down");
             }
-        })
-    }));
-
-    if channel.ready_state() == RTCDataChannelState::Open
-        && emission_guard
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    {
-        let transport = WebRtcTransport::from_parts(connection, channel, None);
-        if event_tx
-            .send(WebRtcRuntimeEvent::TransportEstablished { peer_id, transport })
-            .is_err()
-        {
-            log::warn!("[webrtc] transport event dropped; engine likely shutting down");
         }
     }
 }

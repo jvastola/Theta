@@ -1,6 +1,7 @@
 use crate::ecs::Entity;
 use crate::engine::CommandMetricsSnapshot;
 use crate::engine::schedule::Stage;
+use crate::network::voice::VoiceDiagnostics;
 use crate::network::{
     ChangeSet, ComponentDescriptor, ComponentDiff, ComponentKey, DiffPayload, NetworkSession,
 };
@@ -62,6 +63,8 @@ pub struct WebRtcTelemetry {
     pub active_transport: Option<String>,
     pub fallback_available: bool,
     pub peers: Vec<WebRtcPeerSample>,
+    #[serde(default)]
+    pub voice: Option<VoiceDiagnostics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +335,27 @@ impl TelemetryOverlay {
                 },
                 webrtc.peers.len()
             ));
+
+            if let Some(voice) = &webrtc.voice {
+                lines.push(format!(
+                    "    voice pkt {}/{} drop {} bytes {}/{} rate {:>6.1}kbps lat {:>6.1}ms jitter {:>6.1}ms frames {}",
+                    voice.packets_sent,
+                    voice.packets_received,
+                    voice.packets_dropped,
+                    voice.bytes_sent,
+                    voice.bytes_received,
+                    voice.bitrate_kbps,
+                    voice.latency_ms,
+                    voice.jitter_ms,
+                    voice.voiced_frames
+                ));
+                if !voice.active_speakers.is_empty() {
+                    lines.push(format!(
+                        "      speakers {}",
+                        voice.active_speakers.join(", ")
+                    ));
+                }
+            }
 
             for peer in &webrtc.peers {
                 let negotiation = peer
@@ -620,6 +644,36 @@ mod tests {
         assert!(panel.contains("Network"));
         assert!(panel.contains("WebRtc"));
         assert!(panel.contains("32/30"));
+    }
+
+    #[test]
+    fn telemetry_overlay_surfaces_voice_metrics() {
+        let mut overlay = TelemetryOverlay::default();
+        let mut sample = static_sample(6);
+        let voice = VoiceDiagnostics {
+            packets_sent: 10,
+            packets_received: 12,
+            packets_dropped: 1,
+            bytes_sent: 2_048,
+            bytes_received: 3_072,
+            bitrate_kbps: 64.5,
+            latency_ms: 15.25,
+            jitter_ms: 1.5,
+            voiced_frames: 24,
+            active_speakers: vec!["local".into(), "remote".into()],
+        };
+
+        sample.set_webrtc_metrics(Some(WebRtcTelemetry {
+            active_transport: Some("WebRtc".into()),
+            fallback_available: false,
+            peers: Vec::new(),
+            voice: Some(voice),
+        }));
+
+        overlay.ingest(sample);
+        let panel = overlay.text_panel().expect("panel text");
+        assert!(panel.contains("voice pkt 10/12"));
+        assert!(panel.contains("speakers local, remote"));
     }
 
     proptest::prop_compose! {
