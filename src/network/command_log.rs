@@ -1063,6 +1063,20 @@ mod tests {
         }
     }
 
+    struct RejectingVerifier;
+
+    impl SignatureVerifier for RejectingVerifier {
+        fn verify(
+            &self,
+            _author: &CommandAuthor,
+            _lamport: u64,
+            _payload: &CommandPayload,
+            _signature: &CommandSignature,
+        ) -> bool {
+            false
+        }
+    }
+
     #[test]
     fn command_log_config_defaults_align_with_security_expectations() {
         let defaults = CommandLogConfig::security_defaults();
@@ -1320,6 +1334,78 @@ mod tests {
         assert_eq!(applied, 3);
         let remote_entries: Vec<_> = remote.entries().cloned().collect();
         assert_eq!(remote_entries.len(), 3);
+    }
+
+    #[test]
+    fn integrate_remote_rejects_tampered_signature() {
+        let registry = setup_registry();
+        let local_verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let mut source = CommandLog::new(Arc::clone(&registry), local_verifier);
+        let remote_verifier = Arc::new(RejectingVerifier) as Arc<dyn SignatureVerifier>;
+        let mut sink = CommandLog::new(Arc::clone(&registry), remote_verifier);
+
+        let author = CommandAuthor::new(AuthorId(55), CommandRole::Editor);
+        let signer = FakeSignatureSigner::new(author.clone());
+        let payload = CommandPayload::new("editor.create", CommandScope::Global, vec![42]);
+        source
+            .append_local(&signer, payload, Some(ConflictStrategy::Merge))
+            .expect("append signed entry");
+
+        let entry = source.entries().next().expect("entry present").clone();
+        let err = sink
+            .integrate_remote(entry)
+            .expect_err("tampered signature rejected");
+        assert!(matches!(
+            err,
+            CommandLogError::InvalidSignature(id) if id == author.id
+        ));
+    }
+
+    #[test]
+    fn integrate_remote_rate_limits_command_bursts() {
+        let registry = setup_registry();
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let config =
+            CommandLogConfig::with_rate_limit(RateLimitConfig::new(100, 0, Duration::from_secs(1)));
+        let mut log = CommandLog::with_config(Arc::clone(&registry), verifier, config);
+
+        let author = CommandAuthor::new(AuthorId(77), CommandRole::Editor);
+        let mut accepted = 0;
+        let mut rate_limited = false;
+
+        for idx in 0..150u32 {
+            let payload = CommandPayload::new(
+                "editor.selection",
+                CommandScope::Global,
+                vec![(idx % 255) as u8],
+            );
+            let entry = CommandEntry::new(
+                CommandId::new((idx + 1) as u64, author.id.clone()),
+                idx as u64,
+                payload,
+                ConflictStrategy::Merge,
+                author.clone(),
+                None,
+            );
+
+            match log.integrate_remote(entry) {
+                Ok(true) => {
+                    accepted += 1;
+                }
+                Err(CommandLogError::RateLimited(id)) => {
+                    assert_eq!(id, author.id);
+                    rate_limited = true;
+                    break;
+                }
+                other => panic!("unexpected result: {other:?}"),
+            }
+        }
+
+        assert_eq!(accepted, 100, "expected burst limit of 100 commands");
+        assert!(
+            rate_limited,
+            "burst above limit should trigger rate limiting"
+        );
     }
 
     #[test]

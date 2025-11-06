@@ -142,6 +142,114 @@ mod webrtc_tests {
         receiver.close().await;
         send_task.await.expect("sender task completes");
     }
+
+    #[tokio::test]
+    async fn webrtc_transport_tolerates_empty_packet_list() {
+        let (sender, receiver) = WebRtcTransport::pair()
+            .await
+            .expect("create loopback WebRTC pair");
+
+        sender
+            .send_command_packets(&[])
+            .await
+            .expect("sending empty slice succeeds");
+
+        let packet = receiver
+            .receive_command_packet(Duration::from_millis(100))
+            .await
+            .expect("receive completes");
+        assert!(packet.is_none());
+
+        receiver.close().await;
+    }
+
+    #[tokio::test]
+    async fn webrtc_transport_drops_oversized_command_packet() {
+        use crate::network::command_log::{
+            AuthorId, CommandAuthor, CommandBatch, CommandEntry, CommandId, CommandPayload,
+            CommandRole, CommandScope, ConflictStrategy,
+        };
+
+        let (sender, receiver) = WebRtcTransport::pair()
+            .await
+            .expect("create loopback WebRTC pair");
+
+        let author = CommandAuthor::new(AuthorId(11), CommandRole::Editor);
+
+        let oversized_packet = CommandPacket {
+            sequence: 1,
+            nonce: 100,
+            timestamp_ms: current_time_millis(),
+            payload: vec![0u8; MAX_COMMAND_PACKET_BYTES + 1],
+        };
+
+        let valid_entry = CommandEntry::new(
+            CommandId::new(3, AuthorId(11)),
+            current_time_millis(),
+            CommandPayload::new("editor.selection", CommandScope::Global, vec![9, 8, 7]),
+            ConflictStrategy::Merge,
+            author.clone(),
+            None,
+        );
+        let batch = CommandBatch {
+            sequence: 5,
+            nonce: 101,
+            timestamp_ms: current_time_millis(),
+            author: author.id.clone(),
+            entries: vec![valid_entry],
+        };
+        let valid_packet = CommandPacket::from_batch(&batch).expect("serialize valid packet");
+
+        let err = sender
+            .send_command_packets(&[oversized_packet])
+            .await
+            .expect_err("oversized payload should error");
+        if let TransportError::WebRtc(msg) = &err {
+            assert!(msg.contains("maximum message size"));
+        } else {
+            panic!("expected WebRTC error, got {err:?}");
+        }
+
+        sender
+            .send_command_packets(&[valid_packet])
+            .await
+            .expect("small packet sends successfully");
+
+        let received = receiver
+            .receive_command_packet(Duration::from_secs(1))
+            .await
+            .expect("receive completes")
+            .expect("valid packet available");
+        assert_eq!(received.sequence, 5);
+
+        sender.close().await;
+        receiver.close().await;
+    }
+}
+
+#[cfg(test)]
+mod handshake_unit_tests {
+    use super::*;
+
+    #[test]
+    fn session_hello_rejects_empty_nonce() {
+        let message = build_session_hello(1, 0xABCDu64, &[], &[], None, &[0u8; 32]);
+        let result = parse_session_hello(&message, 1, 0xABCDu64);
+        assert!(matches!(
+            result,
+            Err(TransportError::Handshake(msg)) if msg.contains("client nonce")
+        ));
+    }
+
+    #[test]
+    fn session_ack_rejects_empty_nonce() {
+        let message = build_session_ack(1, 0xABCDu64, &[], 42, 7, &[], &[0u8; 32]);
+        let result = parse_session_ack(&message, 1, 0xABCDu64);
+        assert!(matches!(
+            result,
+            Err(TransportError::Handshake(msg)) if msg.contains("server nonce")
+        ));
+    }
 }
 
 struct FramedStream {
@@ -1027,6 +1135,11 @@ fn parse_session_hello(
         .ok_or_else(|| TransportError::Handshake("missing client nonce".into()))?
         .iter()
         .collect();
+    if nonce.is_empty() {
+        return Err(TransportError::Handshake(
+            "client nonce must be non-empty".into(),
+        ));
+    }
     Ok(SessionHelloData {
         capabilities,
         client_public_key: public_key_bytes.as_slice().try_into().unwrap(),
@@ -1073,6 +1186,11 @@ fn parse_session_ack(
         .ok_or_else(|| TransportError::Handshake("missing server nonce".into()))?
         .iter()
         .collect();
+    if server_nonce.is_empty() {
+        return Err(TransportError::Handshake(
+            "server nonce must be non-empty".into(),
+        ));
+    }
 
     Ok(SessionAckData {
         session_id: ack.session_id(),
@@ -1404,6 +1522,119 @@ mod tests {
             Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client endpoint");
         endpoint.set_default_client_config(config);
         endpoint
+    }
+
+    #[tokio::test]
+    async fn quic_handshake_timeout_returns_error_within_deadline() {
+        let cert_key = build_certified_key();
+        let transport = Arc::new(quinn::TransportConfig::default());
+        let heartbeat_cfg = HeartbeatConfig {
+            interval: Duration::from_millis(100),
+            timeout: Duration::from_millis(500),
+        };
+
+        let mut server_cfg = server_config(&cert_key);
+        server_cfg.transport_config(transport.clone());
+        let server_endpoint =
+            Endpoint::server(server_cfg, "127.0.0.1:0".parse().unwrap()).expect("server endpoint");
+        let server_addr = server_endpoint.local_addr().expect("server addr");
+
+        let server_task = tokio::spawn(async move {
+            if let Some(connecting) = server_endpoint.accept().await {
+                if let Ok(connection) = connecting.await {
+                    // Drop the connection without responding to force the client to time out.
+                    drop(connection);
+                }
+            }
+        });
+
+        let mut client_cfg = client_config(&cert_key);
+        client_cfg.transport_config(transport);
+        let client_endpoint = client_endpoint(client_cfg);
+
+        let start = Instant::now();
+        let result = connect(
+            &client_endpoint,
+            server_addr,
+            ClientHandshake {
+                protocol_version: 1,
+                schema_hash: 0xABCDu64,
+                capabilities: vec![1, 4],
+                auth_token: None,
+                signing_key: SigningKey::generate(&mut OsRng),
+                heartbeat: heartbeat_cfg,
+                server_name: "localhost".into(),
+            },
+        )
+        .await;
+
+        assert!(result.is_err(), "handshake unexpectedly succeeded");
+        assert!(start.elapsed() < Duration::from_secs(2));
+
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn quic_transport_tolerates_empty_packet_list() {
+        let cert_key = build_certified_key();
+        let transport = Arc::new(quinn::TransportConfig::default());
+        let heartbeat_cfg = HeartbeatConfig {
+            interval: Duration::from_millis(100),
+            timeout: Duration::from_secs(1),
+        };
+
+        let mut server_cfg = server_config(&cert_key);
+        server_cfg.transport_config(transport.clone());
+        let server_endpoint =
+            Endpoint::server(server_cfg, "127.0.0.1:0".parse().unwrap()).expect("server endpoint");
+        let server_addr = server_endpoint.local_addr().expect("server addr");
+
+        let server_handshake = ServerHandshake {
+            protocol_version: 1,
+            schema_hash: 0xABCDu64,
+            capabilities: vec![1, 2, 3],
+            signing_key: SigningKey::generate(&mut OsRng),
+            heartbeat: heartbeat_cfg.clone(),
+        };
+
+        let server_task = tokio::spawn(async move {
+            if let Some(connecting) = server_endpoint.accept().await
+                && let Ok(session) = accept(connecting, server_handshake).await
+            {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                session.close().await;
+            }
+        });
+
+        let mut client_cfg = client_config(&cert_key);
+        client_cfg.transport_config(transport);
+        let client_endpoint = client_endpoint(client_cfg);
+
+        let client_session = connect(
+            &client_endpoint,
+            server_addr,
+            ClientHandshake {
+                protocol_version: 1,
+                schema_hash: 0xABCDu64,
+                capabilities: vec![1, 4],
+                auth_token: None,
+                signing_key: SigningKey::generate(&mut OsRng),
+                heartbeat: heartbeat_cfg,
+                server_name: "localhost".into(),
+            },
+        )
+        .await
+        .expect("client handshake");
+
+        client_session
+            .send_command_packets(&[])
+            .await
+            .expect("sending empty slice succeeds");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        client_session.close().await;
+
+        let _ = server_task.await;
     }
 
     #[tokio::test]
@@ -2024,6 +2255,117 @@ mod tests {
         assert!(metrics.packets_sent >= 2);
 
         client_session.close().await;
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn quic_transport_drops_oversized_command_packet() {
+        use crate::network::command_log::{
+            AuthorId, CommandAuthor, CommandBatch, CommandEntry, CommandId, CommandPayload,
+            CommandRole, CommandScope, ConflictStrategy,
+        };
+
+        let cert_key = build_certified_key();
+        let transport = Arc::new(quinn::TransportConfig::default());
+        let heartbeat_cfg = HeartbeatConfig {
+            interval: Duration::from_millis(200),
+            timeout: Duration::from_secs(1),
+        };
+
+        let mut server_cfg = server_config(&cert_key);
+        server_cfg.transport_config(transport.clone());
+        let server_endpoint =
+            Endpoint::server(server_cfg, "127.0.0.1:0".parse().unwrap()).expect("server endpoint");
+        let server_addr = server_endpoint.local_addr().expect("server addr");
+
+        let server_signing_key = SigningKey::generate(&mut OsRng);
+
+        let server_task = tokio::spawn(async move {
+            if let Some(connecting) = server_endpoint.accept().await
+                && let Ok(session) = accept(
+                    connecting,
+                    ServerHandshake {
+                        protocol_version: 1,
+                        schema_hash: 0xABCDu64,
+                        capabilities: vec![1, 2, 3],
+                        signing_key: server_signing_key,
+                        heartbeat: heartbeat_cfg,
+                    },
+                )
+                .await
+            {
+                let packet = session
+                    .receive_command_packet(Duration::from_secs(1))
+                    .await
+                    .expect("receive command packet")
+                    .expect("valid packet available");
+
+                assert_eq!(
+                    packet.sequence, 2,
+                    "expected oversized packet to be dropped"
+                );
+
+                session.close().await;
+            }
+        });
+
+        let mut client_cfg = client_config(&cert_key);
+        client_cfg.transport_config(transport);
+        let client_endpoint = client_endpoint(client_cfg);
+
+        let client_session = connect(
+            &client_endpoint,
+            server_addr,
+            ClientHandshake {
+                protocol_version: 1,
+                schema_hash: 0xABCDu64,
+                capabilities: vec![1, 2, 3],
+                auth_token: None,
+                signing_key: SigningKey::generate(&mut OsRng),
+                heartbeat: HeartbeatConfig {
+                    interval: Duration::from_millis(200),
+                    timeout: Duration::from_secs(1),
+                },
+                server_name: "localhost".into(),
+            },
+        )
+        .await
+        .expect("client handshake");
+
+        let author = CommandAuthor::new(AuthorId(7), CommandRole::Editor);
+
+        let oversized_packet = CommandPacket {
+            sequence: 1,
+            nonce: 9,
+            timestamp_ms: current_time_millis(),
+            payload: vec![0u8; MAX_COMMAND_PACKET_BYTES + 1],
+        };
+
+        let valid_entry = CommandEntry::new(
+            CommandId::new(2, AuthorId(7)),
+            current_time_millis(),
+            CommandPayload::new("editor.selection", CommandScope::Global, vec![1, 2, 3]),
+            ConflictStrategy::Merge,
+            author.clone(),
+            None,
+        );
+        let batch = CommandBatch {
+            sequence: 2,
+            nonce: 10,
+            timestamp_ms: current_time_millis(),
+            author: author.id.clone(),
+            entries: vec![valid_entry],
+        };
+        let valid_packet = CommandPacket::from_batch(&batch).expect("serialize valid packet");
+
+        client_session
+            .send_command_packets(&[oversized_packet, valid_packet])
+            .await
+            .expect("send packets");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        client_session.close().await;
+
         let _ = server_task.await;
     }
 
