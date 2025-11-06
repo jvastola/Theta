@@ -364,12 +364,16 @@ impl TransportSession {
                     let latency_ms =
                         (current_time_millis().saturating_sub(packet.timestamp_ms)) as f32;
                     self.metrics.update(|m| {
+                        let previous_latency = m.command_latency_ms;
                         m.kind = TransportKind::Quic;
                         m.packets_received = m.packets_received.saturating_add(1);
                         m.command_packets_received = m.command_packets_received.saturating_add(1);
                         m.compression_ratio = 1.0;
                         m.command_bandwidth_bytes_per_sec = frame.len() as f32;
                         m.command_latency_ms = latency_ms;
+                        let delta = (latency_ms - previous_latency).abs();
+                        m.jitter_ms = (m.jitter_ms * 0.8) + (delta * 0.2);
+                        m.rtt_ms = latency_ms;
                     });
                     return Ok(Some(packet));
                 }
@@ -555,12 +559,16 @@ impl WebRtcTransport {
                     let latency_ms =
                         (current_time_millis().saturating_sub(packet.timestamp_ms)) as f32;
                     self.metrics.update(|m| {
+                        let previous_latency = m.command_latency_ms;
                         m.kind = TransportKind::WebRtc;
                         m.packets_received = m.packets_received.saturating_add(1);
                         m.command_packets_received = m.command_packets_received.saturating_add(1);
                         m.compression_ratio = m.compression_ratio.max(1.0);
                         m.command_bandwidth_bytes_per_sec = frame.len() as f32;
                         m.command_latency_ms = latency_ms;
+                        let delta = (latency_ms - previous_latency).abs();
+                        m.jitter_ms = (m.jitter_ms * 0.8) + (delta * 0.2);
+                        m.rtt_ms = latency_ms;
                     });
                     return Ok(Some(packet));
                 }

@@ -10,7 +10,11 @@ use crate::editor::commands::{
     EntityTranslateCommand, FaceSubdivideCommand, SelectionHighlightCommand, ToolActivateCommand,
     ToolDeactivateCommand, VertexCreateCommand,
 };
-use crate::editor::telemetry::{FrameTelemetry, TelemetryReplicator, TelemetrySurface};
+use crate::editor::telemetry::{
+    FrameTelemetry, TelemetryReplicator, TelemetrySurface, WebRtcTelemetry,
+};
+#[cfg(feature = "network-quic")]
+use crate::editor::telemetry::{WebRtcIceMetrics, WebRtcLinkMetrics, WebRtcPeerSample};
 use crate::editor::{CommandOutbox, CommandTransportQueue};
 use crate::network::EntityHandle;
 use crate::network::command_log::{CommandBatch, CommandEntry, CommandPacket, CommandScope};
@@ -23,6 +27,8 @@ use crate::network::signaling::{
 use crate::network::transport::{
     CommandTransport, TransportError, TransportSession, WebRtcTransport,
 };
+#[cfg(feature = "network-quic")]
+use crate::network::{TransportDiagnostics, TransportKind};
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
 #[cfg(feature = "vr-openxr")]
 use crate::vr::openxr::OpenXrInputProvider;
@@ -32,7 +38,7 @@ use crate::vr::{
 use schedule::{Scheduler, Stage, System};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "network-quic")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "network-quic")]
 use std::env;
 #[cfg(feature = "network-quic")]
@@ -74,6 +80,10 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 #[cfg(feature = "network-quic")]
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 #[cfg(feature = "network-quic")]
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
+#[cfg(feature = "network-quic")]
+use webrtc::ice_transport::ice_server::RTCIceServer;
+#[cfg(feature = "network-quic")]
 use webrtc::interceptor::registry::Registry;
 #[cfg(feature = "network-quic")]
 use webrtc::peer_connection::RTCPeerConnection;
@@ -88,6 +98,19 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 const DEFAULT_MAX_FRAMES: u32 = 3;
 
+#[cfg(feature = "network-quic")]
+const WEBRTC_OFFER_RETRY_MAX: u32 = 3;
+#[cfg(feature = "network-quic")]
+const WEBRTC_OFFER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(feature = "network-quic")]
+const WEBRTC_ICE_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+#[cfg(feature = "network-quic")]
+const WEBRTC_NEGOTIATION_STALE_AFTER: Duration = Duration::from_secs(30);
+#[cfg(feature = "network-quic")]
+const WEBRTC_ICE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(20);
+#[cfg(feature = "network-quic")]
+const WEBRTC_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+
 pub struct Engine {
     scheduler: Scheduler,
     renderer: Renderer,
@@ -100,6 +123,8 @@ pub struct Engine {
     command_pipeline: Arc<Mutex<CommandPipeline>>,
     #[cfg(feature = "network-quic")]
     command_transport: Option<CommandTransport>,
+    #[cfg(feature = "network-quic")]
+    command_transport_fallback: Option<CommandTransport>,
     #[cfg(feature = "network-quic")]
     network_runtime: Option<TokioRuntime>,
     #[cfg(feature = "network-quic")]
@@ -122,6 +147,8 @@ pub struct Engine {
     webrtc_event_rx: UnboundedReceiver<WebRtcRuntimeEvent>,
     #[cfg(feature = "network-quic")]
     active_webrtc_peer: Option<PeerId>,
+    #[cfg(feature = "network-quic")]
+    webrtc_ice_servers: Vec<IceServerConfig>,
 }
 
 impl Engine {
@@ -154,6 +181,8 @@ impl Engine {
             #[cfg(feature = "network-quic")]
             command_transport: None,
             #[cfg(feature = "network-quic")]
+            command_transport_fallback: None,
+            #[cfg(feature = "network-quic")]
             network_runtime: None,
             #[cfg(feature = "network-quic")]
             signaling_handle: None,
@@ -175,6 +204,8 @@ impl Engine {
             webrtc_event_rx,
             #[cfg(feature = "network-quic")]
             active_webrtc_peer: None,
+            #[cfg(feature = "network-quic")]
+            webrtc_ice_servers: load_webrtc_ice_servers(),
         };
 
         engine.register_core_systems();
@@ -696,6 +727,18 @@ impl Engine {
             .expect("network runtime should exist")
     }
 
+    fn build_rtc_configuration(&self) -> RTCConfiguration {
+        let mut config = RTCConfiguration::default();
+        if !self.webrtc_ice_servers.is_empty() {
+            config.ice_servers = self
+                .webrtc_ice_servers
+                .iter()
+                .map(IceServerConfig::to_rtc)
+                .collect();
+        }
+        config
+    }
+
     fn ensure_peer_connection(
         &mut self,
         peer_id: &PeerId,
@@ -709,14 +752,77 @@ impl Engine {
         }
 
         let api = build_webrtc_api()?;
+        let config = self.build_rtc_configuration();
         let runtime = self.ensure_network_runtime();
         let connection = runtime
-            .block_on(async { api.new_peer_connection(RTCConfiguration::default()).await })
+            .block_on(async { api.new_peer_connection(config).await })
             .map_err(|err| err.to_string())?;
         let connection = Arc::new(connection);
         self.configure_peer_connection_callbacks(peer_id.clone(), &connection)?;
         self.ensure_webrtc_entry(peer_id).connection = Some(Arc::clone(&connection));
         Ok(connection)
+    }
+
+    fn install_active_transport(&mut self, transport: CommandTransport) -> TransportKind {
+        let kind = transport.kind();
+        let metrics = transport.metrics_handle();
+        if let Ok(mut pipeline) = self.command_pipeline.lock() {
+            pipeline.attach_transport_metrics(metrics);
+        }
+        self.command_transport = Some(transport);
+        kind
+    }
+
+    fn stash_current_transport_for_fallback(&mut self) {
+        if let Some(existing) = self.command_transport.take() {
+            match existing {
+                CommandTransport::WebRtc(_) => {
+                    self.close_transport(existing);
+                }
+                other => {
+                    if let Some(replaced) = self.command_transport_fallback.replace(other) {
+                        self.close_transport(replaced);
+                    }
+                }
+            }
+        }
+    }
+
+    fn close_transport(&mut self, transport: CommandTransport) {
+        let runtime = self.ensure_network_runtime();
+        runtime.block_on(async move {
+            transport.close().await;
+        });
+    }
+
+    fn reactivate_fallback_transport(&mut self) {
+        if let Some(fallback) = self.command_transport_fallback.take() {
+            let kind = self.install_active_transport(fallback);
+            log::info!("[webrtc] restored fallback {kind:?} command transport after WebRTC drop");
+        }
+    }
+
+    fn shutdown_active_webrtc_transport(&mut self) {
+        let mut needs_fallback = false;
+
+        if let Some(active) = self.command_transport.take() {
+            match active {
+                CommandTransport::WebRtc(_) => {
+                    self.close_transport(active);
+                    needs_fallback = true;
+                }
+                other => {
+                    self.command_transport = Some(other);
+                }
+            }
+        } else {
+            needs_fallback = true;
+        }
+
+        if needs_fallback {
+            self.active_webrtc_peer = None;
+            self.reactivate_fallback_transport();
+        }
     }
 
     fn configure_peer_connection_callbacks(
@@ -746,9 +852,11 @@ impl Engine {
 
         let signaling_for_ice = Arc::clone(&signaling_client);
         let remote_for_ice = peer_id.clone();
+        let event_tx_for_ice = self.webrtc_event_tx.clone();
         connection.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
             let signaling = Arc::clone(&signaling_for_ice);
             let remote = remote_for_ice.clone();
+            let event_tx = event_tx_for_ice.clone();
             Box::pin(async move {
                 let Some(candidate) = candidate else {
                     return;
@@ -758,12 +866,25 @@ impl Engine {
                         let candidate = IceCandidate {
                             candidate: json.candidate,
                             sdp_mid: json.sdp_mid,
-                            sdp_mline_index: json.sdp_mline_index.map(|value| value as u16),
+                            sdp_mline_index: json.sdp_mline_index,
                         };
                         let mut client = signaling.lock().await;
-                        if let Err(err) = client.send_ice_candidate(&remote, candidate).await {
+                        let send_result = client.send_ice_candidate(&remote, candidate.clone()).await;
+                        drop(client);
+                        if let Err(err) = send_result {
                             log::warn!(
                                 "[webrtc] failed to send ICE candidate to {}: {err}",
+                                remote.0
+                            );
+                        } else if event_tx
+                            .send(WebRtcRuntimeEvent::LocalIceCandidate {
+                                peer_id: remote.clone(),
+                                candidate,
+                            })
+                            .is_err()
+                        {
+                            log::trace!(
+                                "[webrtc] dropping local ICE candidate event for {}; receiver closed",
                                 remote.0
                             );
                         }
@@ -933,6 +1054,7 @@ impl Engine {
 
     fn flush_pending_ice(&mut self, peer_id: &PeerId) {
         let (connection, mut pending) = {
+            let now = Instant::now();
             let Some(entry) = self.webrtc_peers.get_mut(peer_id) else {
                 return;
             };
@@ -940,10 +1062,17 @@ impl Engine {
                 return;
             }
 
+            if let Some(last_retry) = entry.last_ice_retry
+                && now.duration_since(last_retry) < WEBRTC_ICE_RETRY_INTERVAL
+            {
+                return;
+            }
+
             let Some(connection) = entry.connection.as_ref().cloned() else {
                 return;
             };
 
+            entry.last_ice_retry = Some(now);
             let pending = std::mem::take(&mut entry.pending_ice);
             (connection, pending)
         };
@@ -954,7 +1083,7 @@ impl Engine {
             let init = RTCIceCandidateInit {
                 candidate: candidate.candidate.clone(),
                 sdp_mid: candidate.sdp_mid.clone(),
-                sdp_mline_index: candidate.sdp_mline_index.map(|value| value as u16),
+                sdp_mline_index: candidate.sdp_mline_index,
                 username_fragment: None,
             };
 
@@ -975,8 +1104,329 @@ impl Engine {
         }
 
         if let Some(entry) = self.webrtc_peers.get_mut(peer_id) {
+            if leftovers.is_empty() {
+                entry.last_ice_retry = None;
+            } else {
+                entry.last_ice_retry = Some(Instant::now());
+            }
             entry.pending_ice = leftovers;
         }
+    }
+
+    fn retry_local_offer(&mut self, peer_id: &PeerId) -> Result<(), String> {
+        let Some(local_peer) = self.local_signaling_peer.clone() else {
+            return Err("local signaling peer unavailable".into());
+        };
+
+        let offer = self.create_local_offer(peer_id)?;
+        self.signaling_send_offer(&local_peer, peer_id, offer)
+            .map_err(|err| err.to_string())?;
+
+        if let Some(entry) = self.webrtc_peers.get_mut(peer_id) {
+            entry.offer_attempts = entry.offer_attempts.saturating_add(1);
+            entry.last_offer_retry = Some(Instant::now());
+            entry.last_event = Instant::now();
+        }
+
+        Ok(())
+    }
+
+    fn record_local_ice_candidate(&mut self, peer_id: &PeerId, candidate: &IceCandidate) {
+        self.record_ice_candidate_with_origin(peer_id, candidate, IceCandidateOrigin::Local);
+    }
+
+    fn record_remote_ice_candidate(&mut self, peer_id: &PeerId, candidate: &IceCandidate) {
+        self.record_ice_candidate_with_origin(peer_id, candidate, IceCandidateOrigin::Remote);
+    }
+
+    fn record_ice_candidate_with_origin(
+        &mut self,
+        peer_id: &PeerId,
+        candidate: &IceCandidate,
+        origin: IceCandidateOrigin,
+    ) {
+        let kind = classify_ice_candidate(&candidate.candidate);
+        let entry = self.ensure_webrtc_entry(peer_id);
+        match origin {
+            IceCandidateOrigin::Local => {
+                entry.local_candidate_types.insert(kind);
+            }
+            IceCandidateOrigin::Remote => {
+                entry.remote_candidate_types.insert(kind);
+            }
+        }
+
+        match kind {
+            IceCandidateKind::ServerReflexive => entry.saw_srflx_candidate = true,
+            IceCandidateKind::Relay => entry.saw_relay_candidate = true,
+            _ => {}
+        }
+
+        if entry.ice_validation_started.is_none() {
+            entry.ice_validation_started = Some(Instant::now());
+        }
+    }
+
+    fn mark_webrtc_failed(&mut self, peer_id: PeerId, reason: &str) {
+        log::warn!(
+            "[webrtc] marking negotiation with {} as failed: {}",
+            peer_id.0,
+            reason
+        );
+
+        let now = Instant::now();
+        let mut connection_to_close = None;
+        if let Some(entry) = self.webrtc_peers.get_mut(&peer_id) {
+            connection_to_close = entry.connection.take();
+            entry.state = WebRtcConnectionPhase::Failed;
+            entry.last_event = now;
+            entry.pending_remote_sdp = None;
+            entry.pending_ice.clear();
+            entry.negotiation_started = None;
+            entry.connected_since = None;
+            entry.offer_attempts = 0;
+            entry.last_offer_retry = None;
+            entry.last_ice_retry = None;
+            entry.transport_attached = false;
+            entry.next_reconnect_at = Some(now + WEBRTC_RECONNECT_DELAY);
+            entry.ice_validation_started = None;
+            entry.local_candidate_types.clear();
+            entry.remote_candidate_types.clear();
+            entry.saw_srflx_candidate = false;
+            entry.saw_relay_candidate = false;
+        }
+
+        if let Some(connection) = connection_to_close {
+            let runtime = self.ensure_network_runtime();
+            if let Err(err) = runtime.block_on(async move { connection.close().await }) {
+                log::warn!(
+                    "[webrtc] failed to close RTCPeerConnection for {} after failure: {err}",
+                    peer_id.0
+                );
+            }
+        }
+
+        if self.active_webrtc_peer.as_ref() == Some(&peer_id) {
+            self.shutdown_active_webrtc_transport();
+        }
+    }
+
+    fn tick_webrtc_negotiation(&mut self) {
+        let now = Instant::now();
+        let mut offer_retries: Vec<PeerId> = Vec::new();
+        let mut ice_retries: Vec<PeerId> = Vec::new();
+        let mut stale: Vec<(PeerId, &'static str)> = Vec::new();
+        let mut reconnect: Vec<PeerId> = Vec::new();
+        let mut postpone_reconnect: Vec<PeerId> = Vec::new();
+
+        for (peer_id, entry) in &self.webrtc_peers {
+            match entry.state {
+                WebRtcConnectionPhase::NegotiatingOffer
+                | WebRtcConnectionPhase::AwaitingRemoteAnswer => {
+                    if entry.initiated_by_local
+                        && entry.offer_attempts > 0
+                        && entry.offer_attempts < WEBRTC_OFFER_RETRY_MAX
+                        && entry
+                            .last_offer_retry
+                            .map(|last| now.duration_since(last) >= WEBRTC_OFFER_RETRY_INTERVAL)
+                            .unwrap_or(true)
+                    {
+                        offer_retries.push(peer_id.clone());
+                    } else if entry.initiated_by_local
+                        && entry.offer_attempts >= WEBRTC_OFFER_RETRY_MAX
+                        && !stale.iter().any(|(id, _)| id == peer_id)
+                    {
+                        stale.push((peer_id.clone(), "offer retries exhausted"));
+                    }
+                }
+                WebRtcConnectionPhase::AwaitingIceCompletion => {
+                    if !entry.pending_ice.is_empty()
+                        && entry
+                            .last_ice_retry
+                            .map(|last| now.duration_since(last) >= WEBRTC_ICE_RETRY_INTERVAL)
+                            .unwrap_or(true)
+                    {
+                        ice_retries.push(peer_id.clone());
+                    }
+                }
+                _ => {}
+            }
+
+            if matches!(
+                entry.state,
+                WebRtcConnectionPhase::NegotiatingOffer
+                    | WebRtcConnectionPhase::AwaitingRemoteAnswer
+                    | WebRtcConnectionPhase::AwaitingLocalAnswer
+                    | WebRtcConnectionPhase::AwaitingIceCompletion
+            ) && entry
+                .negotiation_started
+                .map(|started| now.duration_since(started) >= WEBRTC_NEGOTIATION_STALE_AFTER)
+                .unwrap_or(false)
+                && !stale.iter().any(|(id, _)| id == peer_id)
+            {
+                stale.push((peer_id.clone(), "negotiation stale"));
+            }
+
+            if matches!(
+                entry.state,
+                WebRtcConnectionPhase::NegotiatingOffer
+                    | WebRtcConnectionPhase::AwaitingRemoteAnswer
+                    | WebRtcConnectionPhase::AwaitingLocalAnswer
+                    | WebRtcConnectionPhase::AwaitingIceCompletion
+            ) && entry
+                .ice_validation_started
+                .map(|started| now.duration_since(started) >= WEBRTC_ICE_VALIDATION_TIMEOUT)
+                .unwrap_or(false)
+                && !entry.saw_srflx_candidate
+                && !entry.saw_relay_candidate
+                && !stale.iter().any(|(id, _)| id == peer_id)
+            {
+                stale.push((peer_id.clone(), "no srflx/relay candidates"));
+            }
+
+            if matches!(
+                entry.state,
+                WebRtcConnectionPhase::Failed
+                    | WebRtcConnectionPhase::Closed
+                    | WebRtcConnectionPhase::Closing
+            ) && let Some(deadline) = entry.next_reconnect_at
+                && deadline <= now
+            {
+                let can_initiate = self
+                    .local_signaling_peer
+                    .as_ref()
+                    .map(|local| local.0 < peer_id.0)
+                    .unwrap_or(false);
+
+                if can_initiate {
+                    reconnect.push(peer_id.clone());
+                } else {
+                    postpone_reconnect.push(peer_id.clone());
+                }
+            }
+        }
+
+        for peer_id in offer_retries {
+            match self.retry_local_offer(&peer_id) {
+                Ok(()) => {
+                    log::info!(
+                        "[webrtc] re-sent SDP offer to {} (attempt {})",
+                        peer_id.0,
+                        self.webrtc_peers
+                            .get(&peer_id)
+                            .map(|entry| entry.offer_attempts)
+                            .unwrap_or_default()
+                    );
+                }
+                Err(err) => {
+                    log::error!("[webrtc] failed to retry offer for {}: {err}", peer_id.0);
+                    self.mark_webrtc_failed(peer_id, "offer retry failed");
+                }
+            }
+        }
+
+        for peer_id in ice_retries {
+            self.flush_pending_ice(&peer_id);
+        }
+
+        for (peer_id, reason) in stale {
+            self.mark_webrtc_failed(peer_id, reason);
+        }
+
+        for peer_id in postpone_reconnect {
+            if let Some(entry) = self.webrtc_peers.get_mut(&peer_id) {
+                entry.next_reconnect_at = Some(now + WEBRTC_RECONNECT_DELAY);
+            }
+        }
+
+        for peer_id in reconnect {
+            if let Some(entry) = self.webrtc_peers.get_mut(&peer_id) {
+                entry.next_reconnect_at = Some(now + WEBRTC_RECONNECT_DELAY);
+            }
+            self.initiate_webrtc_connection(peer_id);
+        }
+    }
+
+    fn snapshot_webrtc_metrics(&self) -> Option<WebRtcTelemetry> {
+        let mut telemetry = WebRtcTelemetry {
+            active_transport: None,
+            fallback_available: self.command_transport_fallback.is_some(),
+            peers: Vec::new(),
+        };
+
+        if let Some(transport) = self.command_transport.as_ref() {
+            telemetry.active_transport = Some(format!("{:?}", transport.kind()));
+        }
+
+        if self.webrtc_peers.is_empty()
+            && telemetry.active_transport.is_none()
+            && !telemetry.fallback_available
+        {
+            return None;
+        }
+
+        let now = Instant::now();
+        for (peer_id, entry) in &self.webrtc_peers {
+            let since_last_event_ms = now
+                .saturating_duration_since(entry.last_event)
+                .as_secs_f32()
+                * 1000.0;
+
+            let negotiation_ms = entry.negotiation_started.map(|started| {
+                let end = entry.connected_since.unwrap_or(now);
+                end.saturating_duration_since(started).as_secs_f32() * 1000.0
+            });
+
+            let reconnect_after_ms = entry
+                .next_reconnect_at
+                .map(|deadline| deadline.saturating_duration_since(now).as_secs_f32() * 1000.0);
+
+            let ice_metrics = WebRtcIceMetrics {
+                local_sources: candidate_kind_set_to_strings(&entry.local_candidate_types),
+                remote_sources: candidate_kind_set_to_strings(&entry.remote_candidate_types),
+                srflx_seen: entry.saw_srflx_candidate,
+                relay_seen: entry.saw_relay_candidate,
+            };
+
+            let (quality, link) = if self.active_webrtc_peer.as_ref() == Some(peer_id) {
+                if let Some(CommandTransport::WebRtc(transport)) = self.command_transport.as_ref() {
+                    if let Some(metrics) = transport.metrics_handle().latest() {
+                        let quality = classify_link_quality(&metrics).to_string();
+                        let link = WebRtcLinkMetrics {
+                            latency_ms: metrics.command_latency_ms,
+                            jitter_ms: metrics.jitter_ms,
+                            bandwidth_kbps: metrics.command_bandwidth_bytes_per_sec * 8.0 / 1000.0,
+                            packets_sent: metrics.command_packets_sent,
+                            packets_received: metrics.command_packets_received,
+                            compression_ratio: metrics.compression_ratio,
+                        };
+                        (quality, Some(link))
+                    } else {
+                        (String::new(), None)
+                    }
+                } else {
+                    (String::new(), None)
+                }
+            } else {
+                (String::new(), None)
+            };
+
+            telemetry.peers.push(WebRtcPeerSample {
+                peer_id: peer_id.0.clone(),
+                state: format!("{:?}", entry.state),
+                initiated_by_local: entry.initiated_by_local,
+                retries: entry.offer_attempts.saturating_sub(1),
+                pending_ice: entry.pending_ice.len(),
+                negotiation_ms,
+                since_last_event_ms,
+                quality,
+                ice: ice_metrics,
+                link,
+                reconnect_after_ms,
+            });
+        }
+
+        Some(telemetry)
     }
 
     fn bootstrap_signaling(&mut self) -> Result<(), SignalingError> {
@@ -1041,9 +1491,7 @@ impl Engine {
     }
 
     fn ensure_webrtc_entry(&mut self, peer_id: &PeerId) -> &mut WebRtcPeerEntry {
-        self.webrtc_peers
-            .entry(peer_id.clone())
-            .or_insert_with(WebRtcPeerEntry::default)
+        self.webrtc_peers.entry(peer_id.clone()).or_default()
     }
 
     fn handle_webrtc_offer(&mut self, from: PeerId, sdp: SessionDescription) {
@@ -1053,6 +1501,19 @@ impl Engine {
             entry.state = WebRtcConnectionPhase::AwaitingLocalAnswer;
             entry.initiated_by_local = false;
             entry.last_event = Instant::now();
+            entry.negotiation_started = Some(Instant::now());
+            entry.connected_since = None;
+            entry.offer_attempts = 0;
+            entry.last_offer_retry = None;
+            entry.last_ice_retry = None;
+            entry.transport_attached = false;
+            entry.pending_ice.clear();
+            entry.ice_validation_started = Some(Instant::now());
+            entry.next_reconnect_at = None;
+            entry.local_candidate_types.clear();
+            entry.remote_candidate_types.clear();
+            entry.saw_srflx_candidate = false;
+            entry.saw_relay_candidate = false;
         }
 
         match self.accept_remote_offer(&from, sdp) {
@@ -1077,6 +1538,11 @@ impl Engine {
             let entry = self.ensure_webrtc_entry(&from);
             entry.pending_remote_sdp = Some(sdp.clone());
             entry.last_event = Instant::now();
+            if entry.negotiation_started.is_none() {
+                entry.negotiation_started = Some(Instant::now());
+            }
+            entry.connected_since = None;
+            entry.last_ice_retry = None;
         }
 
         match self.apply_remote_answer(&from, sdp) {
@@ -1099,7 +1565,7 @@ impl Engine {
     fn handle_ice_candidate(&mut self, from: PeerId, candidate: IceCandidate) {
         {
             let entry = self.ensure_webrtc_entry(&from);
-            entry.pending_ice.push(candidate);
+            entry.pending_ice.push(candidate.clone());
             entry.last_event = Instant::now();
             log::debug!(
                 "[webrtc] queued ICE candidate from {} (queued: {})",
@@ -1108,6 +1574,7 @@ impl Engine {
             );
         }
 
+        self.record_remote_ice_candidate(&from, &candidate);
         self.flush_pending_ice(&from);
     }
 
@@ -1115,20 +1582,17 @@ impl Engine {
         let label = peer_id.0.clone();
         let Some(local_peer) = self.local_signaling_peer.clone() else {
             log::warn!(
-                "[webrtc] cannot initiate negotiation with {} without local signaling peer",
-                label
+                "[webrtc] cannot initiate negotiation with {label} without local signaling peer"
             );
             return;
         };
 
         if local_peer.0 >= peer_id.0 {
-            log::debug!(
-                "[webrtc] deferring offer for {} to lexicographically smaller peer",
-                label
-            );
+            log::debug!("[webrtc] deferring offer for {label} to lexicographically smaller peer");
             return;
         }
 
+        let now = Instant::now();
         {
             let entry = self.ensure_webrtc_entry(&peer_id);
             match entry.state {
@@ -1154,33 +1618,38 @@ impl Engine {
             }
             entry.state = WebRtcConnectionPhase::NegotiatingOffer;
             entry.initiated_by_local = true;
-            entry.last_event = Instant::now();
+            entry.last_event = now;
+            entry.negotiation_started = Some(now);
+            entry.connected_since = None;
+            entry.offer_attempts = 0;
+            entry.last_offer_retry = None;
+            entry.last_ice_retry = None;
+            entry.ice_validation_started = Some(now);
+            entry.next_reconnect_at = None;
+            entry.local_candidate_types.clear();
+            entry.remote_candidate_types.clear();
+            entry.saw_srflx_candidate = false;
+            entry.saw_relay_candidate = false;
         }
 
         log::info!("[webrtc] initiating negotiation with {label}");
 
         match self.create_local_offer(&peer_id) {
             Ok(offer) => {
+                let send_time = Instant::now();
                 if let Err(err) = self.signaling_send_offer(&local_peer, &peer_id, offer) {
-                    log::error!(
-                        "[webrtc] failed to send offer to {} via signaling: {err}",
-                        label
-                    );
-                    if let Some(entry) = self.webrtc_peers.get_mut(&peer_id) {
-                        entry.state = WebRtcConnectionPhase::Failed;
-                        entry.last_event = Instant::now();
-                    }
+                    log::error!("[webrtc] failed to send offer to {label} via signaling: {err}");
+                    self.mark_webrtc_failed(peer_id.clone(), "offer send failed");
                 } else if let Some(entry) = self.webrtc_peers.get_mut(&peer_id) {
                     entry.state = WebRtcConnectionPhase::AwaitingRemoteAnswer;
-                    entry.last_event = Instant::now();
+                    entry.last_event = send_time;
+                    entry.offer_attempts = 1;
+                    entry.last_offer_retry = Some(send_time);
                 }
             }
             Err(err) => {
-                log::error!("[webrtc] failed to create local offer for {}: {err}", label);
-                if let Some(entry) = self.webrtc_peers.get_mut(&peer_id) {
-                    entry.state = WebRtcConnectionPhase::Failed;
-                    entry.last_event = Instant::now();
-                }
+                log::error!("[webrtc] failed to create local offer for {label}: {err}");
+                self.mark_webrtc_failed(peer_id.clone(), "offer creation failed");
             }
         }
     }
@@ -1213,10 +1682,7 @@ impl Engine {
                 }
             }
             None => {
-                log::debug!(
-                    "[webrtc] cleanup requested for unknown peer {}; ignoring",
-                    label
-                );
+                log::debug!("[webrtc] cleanup requested for unknown peer {label}; ignoring");
             }
         }
     }
@@ -1255,6 +1721,10 @@ enum WebRtcRuntimeEvent {
         peer_id: PeerId,
         state: RTCPeerConnectionState,
     },
+    LocalIceCandidate {
+        peer_id: PeerId,
+        candidate: IceCandidate,
+    },
 }
 
 #[cfg(feature = "network-quic")]
@@ -1268,6 +1738,17 @@ struct WebRtcPeerEntry {
     last_event: Instant,
     has_local_data_channel: bool,
     transport_attached: bool,
+    negotiation_started: Option<Instant>,
+    connected_since: Option<Instant>,
+    offer_attempts: u32,
+    last_offer_retry: Option<Instant>,
+    last_ice_retry: Option<Instant>,
+    ice_validation_started: Option<Instant>,
+    next_reconnect_at: Option<Instant>,
+    local_candidate_types: HashSet<IceCandidateKind>,
+    remote_candidate_types: HashSet<IceCandidateKind>,
+    saw_srflx_candidate: bool,
+    saw_relay_candidate: bool,
 }
 
 #[cfg(feature = "network-quic")]
@@ -1282,6 +1763,17 @@ impl Default for WebRtcPeerEntry {
             last_event: Instant::now(),
             has_local_data_channel: false,
             transport_attached: false,
+            negotiation_started: None,
+            connected_since: None,
+            offer_attempts: 0,
+            last_offer_retry: None,
+            last_ice_retry: None,
+            ice_validation_started: None,
+            next_reconnect_at: None,
+            local_candidate_types: HashSet::new(),
+            remote_candidate_types: HashSet::new(),
+            saw_srflx_candidate: false,
+            saw_relay_candidate: false,
         }
     }
 }
@@ -1324,18 +1816,17 @@ fn hook_transport_emitter(
         })
     }));
 
-    if channel.ready_state() == RTCDataChannelState::Open {
-        if emission_guard
+    if channel.ready_state() == RTCDataChannelState::Open
+        && emission_guard
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
+    {
+        let transport = WebRtcTransport::from_parts(connection, channel);
+        if event_tx
+            .send(WebRtcRuntimeEvent::TransportEstablished { peer_id, transport })
+            .is_err()
         {
-            let transport = WebRtcTransport::from_parts(connection, channel);
-            if event_tx
-                .send(WebRtcRuntimeEvent::TransportEstablished { peer_id, transport })
-                .is_err()
-            {
-                log::warn!("[webrtc] transport event dropped; engine likely shutting down");
-            }
+            log::warn!("[webrtc] transport event dropped; engine likely shutting down");
         }
     }
 }
@@ -1375,6 +1866,190 @@ fn session_description_from_rtc(desc: &RTCSessionDescription) -> SessionDescript
     SessionDescription {
         sdp_type: desc.sdp_type.to_string(),
         sdp: desc.sdp.clone(),
+    }
+}
+
+#[cfg(feature = "network-quic")]
+#[derive(Clone, Debug)]
+struct IceServerConfig {
+    urls: Vec<String>,
+    username: Option<String>,
+    credential: Option<String>,
+}
+
+#[cfg(feature = "network-quic")]
+impl IceServerConfig {
+    fn from_url(url: &str) -> Self {
+        Self {
+            urls: vec![url.trim().to_string()],
+            username: None,
+            credential: None,
+        }
+    }
+
+    fn parse_entry(entry: &str) -> Option<Self> {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let parts: Vec<_> = trimmed.split('|').collect();
+        match parts.len() {
+            1 => Some(Self::from_url(parts[0])),
+            3 => {
+                let url = parts[0].trim();
+                if url.is_empty() {
+                    log::warn!("[webrtc] ignoring ICE server entry with empty url: {trimmed}");
+                    return None;
+                }
+                let username = parts[1].trim().to_string();
+                let credential = parts[2].trim().to_string();
+                Some(Self {
+                    urls: vec![url.to_string()],
+                    username: if username.is_empty() {
+                        None
+                    } else {
+                        Some(username)
+                    },
+                    credential: if credential.is_empty() {
+                        None
+                    } else {
+                        Some(credential)
+                    },
+                })
+            }
+            _ => {
+                log::warn!(
+                    "[webrtc] unable to parse ICE server entry '{trimmed}'; expected 'url' or 'url|username|credential'"
+                );
+                None
+            }
+        }
+    }
+
+    fn to_rtc(&self) -> RTCIceServer {
+        let mut server = RTCIceServer {
+            urls: self.urls.clone(),
+            ..Default::default()
+        };
+        if let Some(username) = &self.username {
+            server.username = username.clone();
+        }
+        if let Some(credential) = &self.credential {
+            server.credential = credential.clone();
+            server.credential_type = RTCIceCredentialType::Password;
+        }
+        server
+    }
+}
+
+#[cfg(feature = "network-quic")]
+fn default_ice_servers() -> Vec<IceServerConfig> {
+    vec![
+        IceServerConfig::from_url("stun:stun.l.google.com:19302"),
+        IceServerConfig::from_url("stun:global.stun.twilio.com:3478"),
+    ]
+}
+
+#[cfg(feature = "network-quic")]
+fn load_webrtc_ice_servers() -> Vec<IceServerConfig> {
+    match env::var("THETA_WEBRTC_ICE_SERVERS") {
+        Ok(raw) => {
+            if raw.trim().eq_ignore_ascii_case("none") {
+                log::warn!("[webrtc] ICE server list disabled via THETA_WEBRTC_ICE_SERVERS");
+                Vec::new()
+            } else {
+                let parsed: Vec<IceServerConfig> = raw
+                    .split(',')
+                    .filter_map(IceServerConfig::parse_entry)
+                    .collect();
+                if parsed.is_empty() {
+                    log::warn!(
+                        "[webrtc] THETA_WEBRTC_ICE_SERVERS produced no valid entries; falling back to defaults"
+                    );
+                    default_ice_servers()
+                } else {
+                    log::info!(
+                        "[webrtc] loaded {} ICE server(s) from environment",
+                        parsed.len()
+                    );
+                    parsed
+                }
+            }
+        }
+        Err(_) => default_ice_servers(),
+    }
+}
+
+#[cfg(feature = "network-quic")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum IceCandidateKind {
+    Host,
+    ServerReflexive,
+    Relay,
+    PeerReflexive,
+    Unknown,
+}
+
+#[cfg(feature = "network-quic")]
+impl IceCandidateKind {
+    fn label(self) -> &'static str {
+        match self {
+            IceCandidateKind::Host => "host",
+            IceCandidateKind::ServerReflexive => "srflx",
+            IceCandidateKind::Relay => "relay",
+            IceCandidateKind::PeerReflexive => "prflx",
+            IceCandidateKind::Unknown => "unknown",
+        }
+    }
+}
+
+#[cfg(feature = "network-quic")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IceCandidateOrigin {
+    Local,
+    Remote,
+}
+
+#[cfg(feature = "network-quic")]
+fn classify_ice_candidate(candidate: &str) -> IceCandidateKind {
+    let mut awaiting_type = false;
+    for token in candidate.split_whitespace() {
+        let lowered = token.trim().to_ascii_lowercase();
+        if awaiting_type {
+            return match lowered.as_str() {
+                "host" => IceCandidateKind::Host,
+                "srflx" | "serverreflexive" => IceCandidateKind::ServerReflexive,
+                "relay" => IceCandidateKind::Relay,
+                "prflx" | "peerreflexive" => IceCandidateKind::PeerReflexive,
+                _ => IceCandidateKind::Unknown,
+            };
+        }
+        awaiting_type = lowered == "typ";
+    }
+    IceCandidateKind::Unknown
+}
+
+#[cfg(feature = "network-quic")]
+fn candidate_kind_set_to_strings(kinds: &HashSet<IceCandidateKind>) -> Vec<String> {
+    let mut labels: Vec<String> = kinds.iter().map(|kind| kind.label().to_string()).collect();
+    labels.sort();
+    labels
+}
+
+#[cfg(feature = "network-quic")]
+fn classify_link_quality(metrics: &TransportDiagnostics) -> &'static str {
+    let latency = metrics.command_latency_ms;
+    let jitter = metrics.jitter_ms;
+
+    if latency <= 80.0 && jitter <= 15.0 {
+        "excellent"
+    } else if latency <= 140.0 && jitter <= 35.0 {
+        "good"
+    } else if latency <= 250.0 || jitter <= 75.0 {
+        "degraded"
+    } else {
+        "poor"
     }
 }
 
@@ -1651,6 +2326,15 @@ impl Engine {
         #[cfg(feature = "network-quic")]
         self.drain_webrtc_runtime_events();
 
+        #[cfg(feature = "network-quic")]
+        let webrtc_metrics = {
+            self.tick_webrtc_negotiation();
+            self.snapshot_webrtc_metrics()
+        };
+
+        #[cfg(not(feature = "network-quic"))]
+        let webrtc_metrics: Option<WebRtcTelemetry> = None;
+
         if let Some(stats_entity) = self.frame_stats_entity
             && let Some(stats) = self
                 .scheduler
@@ -1835,6 +2519,7 @@ impl Engine {
 
         if let Some(sample) = telemetry_sample.as_mut() {
             sample.set_command_metrics(command_metrics_snapshot.clone());
+            sample.set_webrtc_metrics(webrtc_metrics.clone());
         }
 
         if let (Some(entity), Some(sample)) = (self.telemetry_entity, telemetry_sample) {
@@ -1851,6 +2536,7 @@ impl Engine {
                 if command_metrics_snapshot.is_some() {
                     latest.set_command_metrics(command_metrics_snapshot.clone());
                 }
+                latest.set_webrtc_metrics(webrtc_metrics.clone());
                 if let Some(replicator) = world.get_mut::<TelemetryReplicator>(entity) {
                     replicator.publish(entity, &latest);
                 }
@@ -2003,18 +2689,23 @@ impl Engine {
                     }
 
                     if attach_transport {
+                        self.stash_current_transport_for_fallback();
                         self.attach_webrtc_transport(transport);
                         self.active_webrtc_peer = Some(peer_id.clone());
                         if let Some(entry) = self.webrtc_peers.get_mut(&peer_id) {
+                            let now = Instant::now();
                             entry.transport_attached = true;
                             entry.state = WebRtcConnectionPhase::Connected;
-                            entry.last_event = Instant::now();
+                            entry.last_event = now;
+                            entry.connected_since = Some(now);
                         }
                         log::info!("[webrtc] command transport attached for peer {}", peer_id.0);
                     }
                 }
                 Ok(WebRtcRuntimeEvent::ConnectionState { peer_id, state }) => {
+                    let mut should_shutdown = false;
                     if let Some(entry) = self.webrtc_peers.get_mut(&peer_id) {
+                        let now = Instant::now();
                         let phase = match state {
                             RTCPeerConnectionState::Unspecified => WebRtcConnectionPhase::Idle,
                             RTCPeerConnectionState::New => WebRtcConnectionPhase::NegotiatingOffer,
@@ -2027,27 +2718,29 @@ impl Engine {
                             RTCPeerConnectionState::Closed => WebRtcConnectionPhase::Closed,
                         };
                         entry.state = phase;
-                        entry.last_event = Instant::now();
+                        entry.last_event = now;
 
-                        if matches!(
-                            state,
-                            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
-                        ) {
-                            entry.transport_attached = false;
-                            if self.active_webrtc_peer.as_ref() == Some(&peer_id)
-                                && matches!(
-                                    self.command_transport.as_ref(),
-                                    Some(CommandTransport::WebRtc(_))
-                                )
-                            {
-                                self.command_transport = None;
-                                self.active_webrtc_peer = None;
-                                log::info!(
-                                    "[webrtc] detached command transport after {:?} state from {}",
-                                    state,
-                                    peer_id.0
-                                );
+                        match state {
+                            RTCPeerConnectionState::Connected => {
+                                if entry.connected_since.is_none() {
+                                    entry.connected_since = Some(now);
+                                }
+                                entry.transport_attached = true;
+                                entry.next_reconnect_at = None;
+                                entry.ice_validation_started = None;
                             }
+                            RTCPeerConnectionState::Disconnected => {
+                                entry.transport_attached = false;
+                                entry.next_reconnect_at = Some(now + WEBRTC_RECONNECT_DELAY);
+                            }
+                            RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
+                                entry.transport_attached = false;
+                                entry.connected_since = None;
+                                entry.ice_validation_started = None;
+                                entry.next_reconnect_at = Some(now + WEBRTC_RECONNECT_DELAY);
+                                should_shutdown = true;
+                            }
+                            _ => {}
                         }
                     } else {
                         log::debug!(
@@ -2056,6 +2749,20 @@ impl Engine {
                             peer_id.0
                         );
                     }
+
+                    if should_shutdown {
+                        if self.active_webrtc_peer.as_ref() == Some(&peer_id) {
+                            log::info!(
+                                "[webrtc] detaching command transport after {:?} state from {}",
+                                state,
+                                peer_id.0
+                            );
+                        }
+                        self.shutdown_active_webrtc_transport();
+                    }
+                }
+                Ok(WebRtcRuntimeEvent::LocalIceCandidate { peer_id, candidate }) => {
+                    self.record_local_ice_candidate(&peer_id, &candidate);
                 }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
@@ -2307,6 +3014,11 @@ mod tests {
         CommandScope, ConflictStrategy,
     };
 
+    #[cfg(feature = "network-quic")]
+    use crate::network::signaling::PeerId;
+    #[cfg(feature = "network-quic")]
+    use crate::network::transport::WebRtcTransport;
+
     #[test]
     fn apply_remote_selection_highlight_updates_world() {
         let mut engine = Engine::new();
@@ -2501,5 +3213,58 @@ mod tests {
             .expect("tool state present");
         assert!(tool_state.active_tool.is_none());
         assert_eq!(tool_state.last_lamport, Some(21));
+    }
+
+    #[cfg(feature = "network-quic")]
+    #[test]
+    fn webrtc_offer_timeout_reactivates_fallback_transport() {
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("THETA_SIGNALING_DISABLED");
+                }
+            }
+        }
+
+        unsafe {
+            std::env::set_var("THETA_SIGNALING_DISABLED", "1");
+        }
+        let _env_guard = EnvGuard;
+
+        let mut engine = Engine::new();
+
+        let runtime = tokio::runtime::Runtime::new().expect("create tokio runtime");
+        let (fallback_transport, active_transport) = runtime.block_on(async {
+            WebRtcTransport::pair()
+                .await
+                .expect("create transport pair")
+        });
+
+        engine.command_transport_fallback = Some(CommandTransport::from(fallback_transport));
+        engine.command_transport = Some(CommandTransport::from(active_transport));
+
+        let peer_id = PeerId("peer-b".into());
+        engine.active_webrtc_peer = Some(peer_id.clone());
+
+        let now = Instant::now();
+        let entry = engine.ensure_webrtc_entry(&peer_id);
+        entry.state = WebRtcConnectionPhase::AwaitingRemoteAnswer;
+        entry.initiated_by_local = true;
+        entry.offer_attempts = WEBRTC_OFFER_RETRY_MAX;
+        entry.last_offer_retry = Some(now - WEBRTC_OFFER_RETRY_INTERVAL);
+        entry.negotiation_started = Some(now - WEBRTC_NEGOTIATION_STALE_AFTER);
+
+        engine.tick_webrtc_negotiation();
+
+        assert!(engine.command_transport.is_some());
+        assert!(engine.command_transport_fallback.is_none());
+        assert!(engine.active_webrtc_peer.is_none());
+        let peer_state = engine
+            .webrtc_peers
+            .get(&peer_id)
+            .map(|entry| entry.state)
+            .expect("peer entry present");
+        assert_eq!(peer_state, WebRtcConnectionPhase::Failed);
     }
 }

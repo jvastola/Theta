@@ -1,7 +1,7 @@
 # Signaling Event Pump Design
 
-**Status:** Negotiation live (offer/answer + ICE integrated; telemetry pending)  
-**Updated:** November 5, 2025
+**Status:** Negotiation live with telemetry + retry/backoff instrumentation  
+**Updated:** November 6, 2025
 
 ## Overview
 
@@ -64,16 +64,30 @@ Each peer entry now tracks:
 - `has_local_data_channel: bool` – ensures we only create one outbound data channel per peer.
 - `transport_attached: bool` – prevents duplicate command transport attachment when multiple open notifications land.
 - `last_event: Instant` – timestamp for telemetry / staleness detection.
+- `negotiation_started: Option<Instant>` – wall-clock for when the active attempt began (used for stale detection + telemetry durations).
+- `connected_since: Option<Instant>` – captures how long a peer has been connected for telemetry summaries.
+- `offer_attempts: u32` – counts how many times we have emitted an SDP offer in the current attempt.
+- `last_offer_retry: Option<Instant>` – throttle window for re-sending offers.
+- `last_ice_retry: Option<Instant>` – throttle window for re-applying buffered ICE candidates.
 
 ### Metrics
 
 - **`signaling_events_polled`**: counter incremented on each processed signaling event (wraps at `u64::MAX`).
-- Next: add per-peer negotiation timers, ICE retry counts, and connection failure tallies surfaced via telemetry.
+- **Frame Telemetry (`FrameTelemetry::webrtc`)** now exports:
+   - `active_transport`: the currently attached command transport kind (`Quic`, `WebRtc`, or `None`).
+   - `fallback_available`: whether a QUIC/session fallback is staged for hand-off.
+   - `peers: Vec<WebRtcPeerSample>` with per-peer `state`, `initiated_by_local`, `retries` (offer resend count), `pending_ice`, `negotiation_ms`, and `since_last_event_ms`.
+- Telemetry overlay renders the above along with peer-specific origin (`local` vs `remote`) to highlight who drove the negotiation.
 
-### Runtime Event Dispatch
+### Runtime Event Dispatch & Retry Loop
 
 - `poll_signaling_events()` still processes at most one signaling response per frame with a zero-timeout poll.
-- `drain_webrtc_runtime_events()` now immediately attaches `WebRtcTransport` instances once data channels report open and mirrors `RTCPeerConnectionState` into `WebRtcConnectionPhase` to drive cleanup/detach logic.
+- `drain_webrtc_runtime_events()` immediately attaches `WebRtcTransport` handles once data channels report open, mirrors `RTCPeerConnectionState` into `WebRtcConnectionPhase`, and stamps `connected_since` for telemetry.
+- `tick_webrtc_negotiation()` runs every frame and enforces:
+   - Offer resend cadence (`WEBRTC_OFFER_RETRY_INTERVAL`, max `WEBRTC_OFFER_RETRY_MAX`).
+   - ICE replay cadence (`WEBRTC_ICE_RETRY_INTERVAL`).
+   - Negotiation staleness timeout (`WEBRTC_NEGOTIATION_STALE_AFTER`).
+   - Automatic degradation to fallback transport via `mark_webrtc_failed()` when retries exhaust or negotiations go stale.
 - The event channel keeps async callbacks off the render thread while retaining deterministic ordering inside the frame loop.
 
 ## WebRTC Negotiation Flow
@@ -93,6 +107,9 @@ Each peer entry now tracks:
    - Applies the remote SDP and flushes queued ICE candidates.
 5. **Data channel opens**
    - The async callback emits a `WebRtcRuntimeEvent::TransportEstablished`, the frame loop attaches a `CommandTransport::WebRtc`, and negotiation state flips to `Connected`.
+6. **Fallback orchestration**
+   - When a WebRTC transport attaches, any previously active QUIC session is preserved as a fallback.
+   - If negotiation later fails or disconnects, `mark_webrtc_failed()` tears down the WebRTC transport and `reactivate_fallback_transport()` re-attaches the preserved session.
 
 ### ICE Candidate Exchange
 
@@ -134,13 +151,14 @@ Each peer entry now tracks:
 - [x] Attach `WebRtcTransport` once data channels report `Open`
 - [x] Queue and replay ICE candidates after SDP application
 
-### Phase 3: Peer Connection Management (In Progress)
+### Phase 3: Peer Connection Management (✅ Complete)
 - [x] Track per-peer negotiation metadata inside `WebRtcPeerEntry`
-- [ ] Surface connection-state transitions and negotiation timings via telemetry
-- [ ] Support blending/hand-off between QUIC and WebRTC transports (including fallback)
-- [ ] Implement retry/backoff for unanswered offers or ICE application failures
+- [x] Surface connection-state transitions and negotiation timings via telemetry
+- [x] Support blending/hand-off between QUIC and WebRTC transports (including fallback)
+- [x] Implement retry/backoff for unanswered offers or ICE application failures
 
 ### Phase 4: Integration & Testing
+- [x] Add regression covering offer timeouts + fallback hand-off (`webrtc_offer_timeout_reactivates_fallback_transport`)
 - [ ] Write integration test: two engines connect via signaling and exchange commands
 - [ ] Validate STUN/TURN fallback paths
 - [ ] Measure connection establishment latency

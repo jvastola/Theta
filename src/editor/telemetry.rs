@@ -18,6 +18,52 @@ pub struct StageSample {
     pub violation_count: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebRtcIceMetrics {
+    #[serde(default)]
+    pub local_sources: Vec<String>,
+    #[serde(default)]
+    pub remote_sources: Vec<String>,
+    pub srflx_seen: bool,
+    pub relay_seen: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebRtcLinkMetrics {
+    pub latency_ms: f32,
+    pub jitter_ms: f32,
+    pub bandwidth_kbps: f32,
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub compression_ratio: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebRtcPeerSample {
+    pub peer_id: String,
+    pub state: String,
+    pub initiated_by_local: bool,
+    pub retries: u32,
+    pub pending_ice: usize,
+    pub negotiation_ms: Option<f32>,
+    pub since_last_event_ms: f32,
+    #[serde(default)]
+    pub quality: String,
+    #[serde(default)]
+    pub ice: WebRtcIceMetrics,
+    #[serde(default)]
+    pub link: Option<WebRtcLinkMetrics>,
+    #[serde(default)]
+    pub reconnect_after_ms: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebRtcTelemetry {
+    pub active_transport: Option<String>,
+    pub fallback_available: bool,
+    pub peers: Vec<WebRtcPeerSample>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrameTelemetry {
     pub frame: u64,
@@ -26,6 +72,7 @@ pub struct FrameTelemetry {
     pub controller_trigger: [f32; 2],
     pub transport: Option<crate::network::TransportDiagnostics>,
     pub command_metrics: Option<CommandMetricsSnapshot>,
+    pub webrtc: Option<WebRtcTelemetry>,
 }
 
 impl FrameTelemetry {
@@ -62,6 +109,7 @@ impl FrameTelemetry {
             controller_trigger,
             transport: None,
             command_metrics: None,
+            webrtc: None,
         }
     }
 
@@ -75,6 +123,10 @@ impl FrameTelemetry {
 
     pub fn set_command_metrics(&mut self, metrics: Option<CommandMetricsSnapshot>) {
         self.command_metrics = metrics;
+    }
+
+    pub fn set_webrtc_metrics(&mut self, metrics: Option<WebRtcTelemetry>) {
+        self.webrtc = metrics;
     }
 }
 
@@ -265,6 +317,83 @@ impl TelemetryOverlay {
                     commands.replay_rejections,
                     commands.payload_guard_drops
                 ));
+            }
+        }
+
+        if let Some(webrtc) = &latest.webrtc {
+            let active = webrtc.active_transport.as_deref().unwrap_or("none");
+            lines.push(format!(
+                "  WebRTC   active {:<8} fallback {} peers {}",
+                active,
+                if webrtc.fallback_available {
+                    "yes"
+                } else {
+                    "no"
+                },
+                webrtc.peers.len()
+            ));
+
+            for peer in &webrtc.peers {
+                let negotiation = peer
+                    .negotiation_ms
+                    .map(|ms| format!("{ms:>6.1}"))
+                    .unwrap_or_else(|| "  ----".to_string());
+                let quality = if peer.quality.is_empty() {
+                    "n/a"
+                } else {
+                    peer.quality.as_str()
+                };
+                lines.push(format!(
+                    "    {:<12} {:<12} quality {:<9} Δ{:>6.1}ms nego {}ms retries {:<2} ice {:<2} init {}",
+                    peer.peer_id,
+                    peer.state,
+                    quality,
+                    peer.since_last_event_ms,
+                    negotiation,
+                    peer.retries,
+                    peer.pending_ice,
+                    if peer.initiated_by_local {
+                        "local"
+                    } else {
+                        "remote"
+                    }
+                ));
+
+                if let Some(link) = &peer.link {
+                    lines.push(format!(
+                        "      link lat {:>6.1}ms jitter {:>6.1}ms bw {:>7.1}kbps pkt {}/{} comp {:.2}",
+                        link.latency_ms,
+                        link.jitter_ms,
+                        link.bandwidth_kbps,
+                        link.packets_sent,
+                        link.packets_received,
+                        link.compression_ratio
+                    ));
+                }
+
+                if !peer.ice.local_sources.is_empty() || !peer.ice.remote_sources.is_empty() {
+                    let local = if peer.ice.local_sources.is_empty() {
+                        "-".to_string()
+                    } else {
+                        peer.ice.local_sources.join(",")
+                    };
+                    let remote = if peer.ice.remote_sources.is_empty() {
+                        "-".to_string()
+                    } else {
+                        peer.ice.remote_sources.join(",")
+                    };
+                    lines.push(format!(
+                        "      ICE local [{}] remote [{}] srflx {} relay {}",
+                        local,
+                        remote,
+                        if peer.ice.srflx_seen { "yes" } else { "no" },
+                        if peer.ice.relay_seen { "yes" } else { "no" }
+                    ));
+                }
+
+                if let Some(ms) = peer.reconnect_after_ms {
+                    lines.push(format!("      reconnect in {ms:>6.1} ms"));
+                }
             }
         }
 
