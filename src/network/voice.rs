@@ -7,10 +7,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "network-quic")]
 use audiopus::{
-    Application as OpusApplication,
-    Channels as OpusChannels,
-    MutSignals,
-    SampleRate,
+    Application as OpusApplication, Channels as OpusChannels, MutSignals, SampleRate,
     coder::{Decoder as OpusDecoder, Encoder as OpusEncoder},
     packet::Packet,
 };

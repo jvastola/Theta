@@ -1821,7 +1821,7 @@ fn hook_transport_emitter(
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     {
-    let transport = WebRtcTransport::from_parts(connection, channel, None);
+        let transport = WebRtcTransport::from_parts(connection, channel, None);
         if event_tx
             .send(WebRtcRuntimeEvent::TransportEstablished { peer_id, transport })
             .is_err()
