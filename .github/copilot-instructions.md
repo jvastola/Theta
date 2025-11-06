@@ -11,7 +11,9 @@
 - Telemetry lives in `editor::telemetry`; use `FrameTelemetry` to surface frame stats, and publish through `TelemetryReplicator` so network transports can stream diagnostics.
 
 ## Networking & Schema
-- QUIC integration (feature `network-quic`) depends on `network/transport`, `command_log`, and `replication`; tests expect Ed25519 signatures, Lamport clocks, and per-author metrics to remain consistent.
+- QUIC integration (feature `network-quic`) depends on `network/transport`, `command_log`, `replication`, and `voice`; tests expect Ed25519 signatures, Lamport clocks, and per-author metrics to remain consistent.
+- **Runtime Management:** All async networking tasks share a Tokio runtime (`Arc<TokioRuntime>`). Engine manages lifecycle via `ensure_network_runtime()` (lazy init) and `set_network_runtime()` (test injection). When calling async transport methods, capture the runtime **before** borrowing transport/pipeline to avoid borrow conflicts (see command dispatch in `update_frame_diagnostics`).
+- **Voice Pipeline:** `network::voice` provides Opus codec, jitter buffer, VAD, and CPAL playback. Engine synthesizes test audio via `synthesize_and_send_voice()` and drains incoming packets via `drain_incoming_voice()` each frame. Voice metrics (`VoiceDiagnostics`) surface in `WebRtcTelemetry` and are updated by both send/receive paths.
 - Schemas use FlatBuffers (`schemas/network.fbs`); regenerate with `flatc` when the schema changes and keep the component manifest in sync via `cargo run --bin generate_manifest [optional/path]`.
 - Stable component IDs come from SipHash seeds in `network/schema.rs`; adding components without registering breaks determinism and blocks replication tests.
 
@@ -21,7 +23,8 @@
 
 ## Workflows & Testing
 - Build with `cargo build`; run the frame loop using the VS Code task (`cargo run`). `Engine::configure_max_frames` caps iterations (default 3) to keep tests deterministic.
-- Core suites live under `tests/`: `command_pipeline_integration.rs`, `replication_integration.rs`, and `telemetry_integration.rs`. Use `cargo test` and rerun with relevant features (`cargo test --all-targets --features network-quic,render-wgpu` when touching transport or GPU paths).
+- Core suites live under `tests/`: `command_pipeline_integration.rs`, `replication_integration.rs`, `telemetry_integration.rs`, and `voice_integration.rs`. Use `cargo test` and rerun with relevant features (`cargo test --all-targets --features network-quic,render-wgpu` when touching transport or GPU paths).
+- Voice integration tests require shared runtime injection: call `engine.set_network_runtime(runtime.clone())` before attaching transports to ensure async operations execute on the test's runtime.
 - Keep formatting/lints clean using `cargo fmt` and `cargo clippy --all-targets --all-features` before posting changes.
 
 ## Collaboration Tips

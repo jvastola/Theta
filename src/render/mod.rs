@@ -5,6 +5,11 @@ use std::fmt;
 #[cfg(feature = "render-wgpu")]
 use std::sync::Arc;
 
+#[cfg(feature = "render-wgpu")]
+pub mod window;
+#[cfg(feature = "render-wgpu")]
+pub use window::{WindowApp, WindowAppTrait, WindowBackend, WindowConfig, WindowEventLoop};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     Null,

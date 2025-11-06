@@ -74,6 +74,7 @@ Define the foundational architecture for the Theta Engine VR-first game engine a
 
 ## Networking Architecture
 - **Transport:** QUIC (native) with WebRTC fallback. Reliability layers for ECS delta compression.
+  - **Runtime Management:** Shared Tokio runtime (`Arc<TokioRuntime>`) coordinates all async networking tasks (QUIC streams, WebRTC data channels, signaling WebSocket). Engine manages runtime lifecycle via `ensure_network_runtime()` and `set_network_runtime()`, eliminating borrow conflicts by capturing the runtime before transport access.
 - **Synchronization:**
   - State replication via component change sets keyed by entity revision.
   - Component keys derive from canonical Rust type names hashed deterministically, keeping identifiers stable across builds and platforms.
@@ -82,6 +83,13 @@ Define the foundational architecture for the Theta Engine VR-first game engine a
   - Conflict resolution driven by CRDT-inspired command logs merged deterministically.
 - **Session Management:** Lobby discovery, host migration, and user permissions for editing operations.
 - **Signaling Bootstrap:** With `network-quic` enabled the engine now brings up a local WebSocket signaling endpoint at startup, registers the local peer, and publishes the resulting metrics. Override the behavior with `THETA_SIGNALING_URL` (external server), `THETA_SIGNALING_BIND` (bind address), `THETA_PEER_ID`, `THETA_ROOM_ID`, `THETA_SIGNALING_TIMEOUT_MS`, or disable entirely via `THETA_SIGNALING_DISABLED=1`.
+- **Voice Integration:**
+  - **Codec:** Opus-based voice encoding (48 kHz mono, 20 ms frames, ~24 kbps target) with configurable bitrate for bandwidth management.
+  - **Jitter Buffer:** Packet reordering buffer (16-frame default capacity) smooths network jitter and out-of-order delivery; oldest excess packets automatically dropped.
+  - **VAD (Voice Activity Detection):** RMS-based energy threshold filters silent frames; only voiced packets increment telemetry counters (`voiced_frames`).
+  - **Playback:** CPAL-driven audio output with automatic sample rate conversion and multi-channel mixing; gracefully degrades to silent mode when no audio device is available.
+  - **Telemetry:** Per-transport voice metrics (`VoiceDiagnostics`) track packets sent/received, bytes transferred, bitrate, latency, dropped packets, and voiced frame counts; surfaced via `WebRtcTelemetry` in `FrameTelemetry` snapshots.
+  - **Synthesis:** Engine synthesizes sine-wave test audio each frame for loopback validation; voice session decodes incoming packets and queues samples for playback.
 
 ## GPU Optimization Focus Areas
 - Batched component uploads using persistently mapped buffers.
@@ -203,9 +211,9 @@ Define the foundational architecture for the Theta Engine VR-first game engine a
 - Haptic feedback and comfort settings
 - Quest 3 APK build pipeline (<200 MB, 72 Hz baseline)
 
-### Current Metrics (Nov 5, 2025)
-- **Tests Passing:** 74 (68 unit + 6 integration; Phase 4 + Phase 5 transport/telemetry extensions validated). Enabling `network-quic` runs 12 additional transport tests (86 total).
+### Current Metrics (Nov 6, 2025)
+- **Tests Passing:** 87 (81 unit + 6 integration; Phase 4 + Phase 5 transport/telemetry/voice extensions validated). Enabling `network-quic` runs 13 additional transport tests (100 total with voice integration suite).
 - **Test Failures:** 0
 - **Phase 4 Completion:** 100%
-- **Lines of Code:** ~8,500 (src + tests)
-- **Feature Coverage:** Core ECS, networking, telemetry complete; mesh editor pending
+- **Lines of Code:** ~9,200 (src + tests, including voice module)
+- **Feature Coverage:** Core ECS, networking, telemetry, voice pipeline complete; mesh editor pending

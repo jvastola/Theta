@@ -13,7 +13,7 @@
 | Phase 4 | Command Log & Conflict Resolution | ✅ Complete | Lamport-ordered command log, signed command pipeline, QUIC command transport, telemetry metrics |
 | Phase 5 | Production Hardening | 🚧 In Flight | Security hardening, WebRTC fallback, compression, interest management |
 
-**Test Coverage:** 103 tests passing (97 unit + 6 integration) with `network-quic`  
+**Test Coverage:** 106 tests passing (100 unit + 6 integration) with `network-quic`  
 **Build Status:** `cargo build`, `cargo test --all-features`, and `cargo clippy --all-targets --all-features -- -D warnings` passing  
 **Feature Flags:** `render-wgpu`, `vr-openxr`, `network-quic` validated in CI
 
@@ -34,10 +34,10 @@
 - Reference plan: `docs/phase5_parallel_plan.md` (parallel work streams and owners).
 
 ## Metrics & Telemetry
-- **Tests:** 103 passing with `network-quic` (97 unit + 6 integration). Coverage now spans handshake nonce validation, timeout handling, oversized payload rejection, signature tampering detection, rate limiting enforcement, replay attack prevention, and the new voice scaffolding suite (codec roundtrip, jitter buffer ordering, VAD detection, session metrics).
+- **Tests:** 106 passing with `network-quic` (100 unit + 6 integration). Coverage now spans handshake nonce validation, timeout handling, oversized payload rejection, signature tampering detection, rate limiting enforcement, replay attack prevention, and the voice pipeline suite (codec roundtrip, jitter buffer ordering, VAD detection, session metrics, loopback integration).
 - **Quality Gates:** `cargo clippy --all-targets --all-features -- -D warnings` enforced; all lint violations resolved.
-- **Performance Instrumentation:** Command metrics now include payload guard drops; transport diagnostics tag the active transport (`Quic` or `WebRtc`) and surface in the overlay for operator awareness.
-- **Codebase Footprint:** ~8,500 source LOC + ~2,700 test LOC (per `COMPLETION_SUMMARY.md`).
+- **Performance Instrumentation:** Command metrics now include payload guard drops; transport diagnostics tag the active transport (`Quic` or `WebRtc`) and surface in the overlay for operator awareness. Voice telemetry (`VoiceDiagnostics`) tracks packets sent/received, bytes, bitrate, latency, dropped packets, and voiced frames.
+- **Codebase Footprint:** ~9,200 source LOC + ~2,900 test LOC (including voice integration).
 
 ## Risks & Mitigations
 - **Quest 3 Performance (Active):** GPU profiling hooks ready; optimization passes scheduled for Phase 7.
@@ -53,6 +53,19 @@
 - **Historical Records:** `docs/archive/phase1-4_summary.md`, `docs/archive/phase2_review.md`, `docs/archive/phase3_plan.md`, `docs/archive/phase3_review.md`
 
 ## Recent Resolutions
+- **Voice Pipeline Integration (Nov 6, 2025):** Full voice communication stack landed with Opus codec, jitter buffer, RMS-based VAD, CPAL playback, and comprehensive telemetry integration:
+  - `VoiceSession` manages codec state, packet buffering, and metrics tracking
+  - `VoicePlayback` drives CPAL output stream with automatic sample rate conversion
+  - Engine synthesizes sine-wave test audio and drains incoming packets each frame
+  - WebRTC transport exposes `send_voice_packet` / `receive_voice_packet` APIs
+  - `VoiceDiagnostics` surfaces packets sent/received, bytes, bitrate, latency, drops, and voiced frame counts
+  - Integration test validates loopback metrics availability across paired engines
+  - 5 unit tests cover codec roundtrip, jitter ordering, VAD detection, session metrics, and playback initialization
+- **Runtime Management Refactor (Nov 6, 2025):** Introduced shared Tokio runtime (`Arc<TokioRuntime>`) to eliminate borrow conflicts:
+  - `Engine::ensure_network_runtime()` lazily initializes runtime on first use
+  - `Engine::set_network_runtime()` allows test injection of shared runtime
+  - Command dispatch logic restructured to capture runtime before acquiring transport/pipeline locks
+  - Integration tests now inject runtime via `set_network_runtime` for deterministic async execution
 - **Edge-Case Test Expansion (Nov 6, 2025):** Added 10 new tests covering transport boundary conditions, failure modes, and adversarial scenarios:
   - Handshake nonce validation (QUIC/WebRTC reject empty nonces)
   - Timeout handling (QUIC handshake returns error within deadline)
@@ -60,10 +73,13 @@
   - Command log signature tampering detection
   - Rate limiting burst enforcement (100 command limit verified)
   - Replay attack prevention (existing test verified against stale nonces)
-- **Voice Module Scaffolding (Nov 6, 2025):** Landed `network::voice` with a passthrough codec, jitter buffer, RMS-based VAD, and voice metrics; four unit tests exercise roundtrips, ordering, detection, and session telemetry.
-- **Lint Compliance:** Resolved all clippy warnings across codebase; dead-code and format lint issues eliminated.
+- **Lint Compliance (Nov 6, 2025):** Resolved all clippy warnings across codebase:
+  - Removed unused `sample_format` field from `VoicePlayback`
+  - Collapsed nested if-let chains in WebRTC promotion and voice metrics paths
+  - Inlined format arguments to satisfy `uninlined_format_args` lint
+- **CI Infrastructure (Nov 6, 2025):** Updated GitHub Actions workflow to install `libasound2-dev` on Ubuntu runners, resolving ALSA build failures for the voice playback dependency.
 - **Phase 4 Status Unified:** All docs now report Phase 4 as complete (previously inconsistently marked 75% complete in `COMPLETION_SUMMARY.md`, `INDEX.md`, and `roadmap_november_2025.md`).
-- **Test Count Aligned:** Repository-wide totals now reflect 103 tests (97 unit + 6 integration with `network-quic`) across completion summary, roadmap, and index.
+- **Test Count Aligned:** Repository-wide totals now reflect 106 tests (100 unit + 6 integration with `network-quic`) across completion summary, roadmap, and index.
 - **Live Doc Paths:** Index navigation now points to archived Phase 2/3 documents and the new unified status overview.
 - **Command Log Security Scaffolding:** Added `CommandLogConfig` with rate limiter and replay tracker defaults plus guard telemetry counters.
 
