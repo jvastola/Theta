@@ -682,7 +682,9 @@ impl Engine {
                             }
                         }
 
-                        if let Some(mut drained) = outbox_packets && !drained.is_empty() {
+                        if let Some(mut drained) = outbox_packets
+                            && !drained.is_empty()
+                        {
                             packets_to_queue.append(&mut drained);
                         }
                     }
