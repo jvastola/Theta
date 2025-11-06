@@ -1918,14 +1918,12 @@ fn hook_transport_emitter(
     }));
 
     if channel.ready_state() == RTCDataChannelState::Open {
-        if let Some((command_channel, voice_channel)) =
-            try_promote_webrtc_transport(
-                &bundles,
-                &peer_id,
-                channel_label.as_str(),
-                Arc::clone(&channel),
-            )
-        {
+        if let Some((command_channel, voice_channel)) = try_promote_webrtc_transport(
+            &bundles,
+            &peer_id,
+            channel_label.as_str(),
+            Arc::clone(&channel),
+        ) {
             let transport =
                 WebRtcTransport::from_parts(connection, command_channel, Some(voice_channel));
             if event_tx
