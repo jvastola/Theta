@@ -28,6 +28,12 @@ const HANDSHAKE_CAPACITY: usize = 1024;
 const FRAME_KIND_COMMAND_PACKET: u8 = 1;
 const FRAME_KIND_COMPONENT_DELTA: u8 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportKind {
+    Quic,
+    WebRtc,
+}
+
 #[derive(Debug, Error)]
 pub enum TransportError {
     #[error("quinn connect error: {0}")]
@@ -52,6 +58,8 @@ pub enum TransportError {
     Serialization(String),
     #[error("quinn read_to_end error: {0}")]
     ReadToEnd(#[from] ReadToEndError),
+    #[error("transport unsupported: {0}")]
+    Unsupported(&'static str),
 }
 
 struct FramedStream {
@@ -208,6 +216,9 @@ impl TransportSession {
         &self.handshake
     }
 
+    pub fn kind(&self) -> TransportKind {
+        TransportKind::Quic
+    }
     pub async fn send_command_packets(
         &self,
         packets: &[CommandPacket],
@@ -300,6 +311,101 @@ impl TransportSession {
 
     pub async fn close(self) {
         self.connection.close(0u32.into(), b"normal shutdown");
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct WebRtcTransport {
+    metrics: TransportMetricsHandle,
+}
+
+impl WebRtcTransport {
+    pub fn new() -> Self {
+        Self {
+            metrics: TransportMetricsHandle::new(),
+        }
+    }
+
+    pub fn metrics_handle(&self) -> TransportMetricsHandle {
+        self.metrics.clone()
+    }
+
+    pub fn kind(&self) -> TransportKind {
+        TransportKind::WebRtc
+    }
+
+    pub async fn send_command_packets(
+        &self,
+        _packets: &[CommandPacket],
+    ) -> Result<(), TransportError> {
+        Err(TransportError::Unsupported(
+            "WebRTC command transport not yet implemented",
+        ))
+    }
+
+    pub async fn receive_command_packet(
+        &self,
+        _timeout: Duration,
+    ) -> Result<Option<CommandPacket>, TransportError> {
+        Err(TransportError::Unsupported(
+            "WebRTC command transport not yet implemented",
+        ))
+    }
+}
+
+pub enum CommandTransport {
+    Quic(TransportSession),
+    WebRtc(WebRtcTransport),
+}
+
+impl CommandTransport {
+    pub fn kind(&self) -> TransportKind {
+        match self {
+            CommandTransport::Quic(_) => TransportKind::Quic,
+            CommandTransport::WebRtc(transport) => transport.kind(),
+        }
+    }
+
+    pub fn metrics_handle(&self) -> TransportMetricsHandle {
+        match self {
+            CommandTransport::Quic(session) => session.metrics_handle(),
+            CommandTransport::WebRtc(transport) => transport.metrics_handle(),
+        }
+    }
+
+    pub async fn send_command_packets(
+        &self,
+        packets: &[CommandPacket],
+    ) -> Result<(), TransportError> {
+        match self {
+            CommandTransport::Quic(session) => session.send_command_packets(packets).await,
+            CommandTransport::WebRtc(transport) => transport.send_command_packets(packets).await,
+        }
+    }
+
+    pub async fn receive_command_packet(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<CommandPacket>, TransportError> {
+        match self {
+            CommandTransport::Quic(session) => session.receive_command_packet(timeout).await,
+            CommandTransport::WebRtc(transport) => transport.receive_command_packet(timeout).await,
+        }
+    }
+
+    pub async fn close(self) {
+        match self {
+            CommandTransport::Quic(session) => session.close().await,
+            CommandTransport::WebRtc(_) => {
+                // Nothing to close yet for the stub transport.
+            }
+        }
+    }
+}
+
+impl From<TransportSession> for CommandTransport {
+    fn from(value: TransportSession) -> Self {
+        CommandTransport::Quic(value)
     }
 }
 

@@ -11,8 +11,7 @@ use crate::network::command_log::{
     CommandSigner, ConflictStrategy, MAX_COMMAND_PACKET_BYTES, NoopCommandSigner,
     NoopSignatureVerifier, SignatureVerifier,
 };
-#[cfg(feature = "network-quic")]
-use crate::network::transport::TransportSession;
+use crate::network::transport::TransportMetricsHandle;
 use crate::network::{EntityHandle, NetworkSession};
 use serde::{Deserialize, Serialize};
 use serde_json::to_vec;
@@ -391,9 +390,8 @@ impl CommandPipeline {
         self.session = session;
     }
 
-    #[cfg(feature = "network-quic")]
-    pub fn attach_transport_session(&mut self, session: &TransportSession) {
-        self.session.attach_transport_session(session);
+    pub fn attach_transport_metrics(&mut self, handle: TransportMetricsHandle) {
+        self.session.attach_transport_metrics(handle);
     }
 }
 

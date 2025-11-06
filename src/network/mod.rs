@@ -215,11 +215,6 @@ impl NetworkSession {
             .and_then(|handle| handle.latest())
     }
 
-    #[cfg(feature = "network-quic")]
-    pub fn attach_transport_session(&mut self, session: &transport::TransportSession) {
-        self.transport_metrics = Some(session.metrics_handle());
-    }
-
     pub fn next_sequence(&mut self) -> u64 {
         self.sequence = self.sequence.wrapping_add(1);
         self.sequence

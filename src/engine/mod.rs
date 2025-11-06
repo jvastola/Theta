@@ -15,7 +15,7 @@ use crate::editor::{CommandOutbox, CommandTransportQueue};
 use crate::network::EntityHandle;
 use crate::network::command_log::{CommandBatch, CommandEntry, CommandPacket, CommandScope};
 #[cfg(feature = "network-quic")]
-use crate::network::transport::{TransportError, TransportSession};
+use crate::network::transport::{CommandTransport, TransportError, TransportSession};
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
 #[cfg(feature = "vr-openxr")]
 use crate::vr::openxr::OpenXrInputProvider;
@@ -44,7 +44,7 @@ pub struct Engine {
     input_provider: Arc<Mutex<Box<dyn VrInputProvider>>>,
     command_pipeline: Arc<Mutex<CommandPipeline>>,
     #[cfg(feature = "network-quic")]
-    transport_session: Option<TransportSession>,
+    command_transport: Option<CommandTransport>,
     #[cfg(feature = "network-quic")]
     network_runtime: Option<TokioRuntime>,
 }
@@ -75,7 +75,7 @@ impl Engine {
             input_provider,
             command_pipeline,
             #[cfg(feature = "network-quic")]
-            transport_session: None,
+            command_transport: None,
             #[cfg(feature = "network-quic")]
             network_runtime: None,
         };
@@ -93,9 +93,9 @@ impl Engine {
     }
 
     #[cfg(feature = "network-quic")]
-    pub fn attach_transport_session(&mut self, session: TransportSession) {
+    pub fn attach_command_transport(&mut self, transport: CommandTransport) {
         if let Ok(mut pipeline) = self.command_pipeline.lock() {
-            pipeline.attach_transport_session(&session);
+            pipeline.attach_transport_metrics(transport.metrics_handle());
         }
 
         if self.network_runtime.is_none() {
@@ -107,7 +107,12 @@ impl Engine {
             );
         }
 
-        self.transport_session = Some(session);
+        self.command_transport = Some(transport);
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn attach_transport_session(&mut self, session: TransportSession) {
+        self.attach_command_transport(CommandTransport::from(session));
     }
 
     pub fn add_system<S>(&mut self, stage: Stage, name: &'static str, system: S)
@@ -707,7 +712,7 @@ impl Engine {
                             if let Some(queue) = world.get_mut::<CommandTransportQueue>(entity) {
                                 queue.enqueue(packets_to_queue.iter().cloned());
                                 #[cfg(feature = "network-quic")]
-                                if self.transport_session.is_some() {
+                                if self.command_transport.is_some() {
                                     let drained = queue.drain_pending();
                                     if !drained.is_empty() {
                                         pending_dispatch = Some(drained);
@@ -726,7 +731,7 @@ impl Engine {
 
                         #[cfg(feature = "network-quic")]
                         if let Some(packets_to_send) = pending_dispatch {
-                            if let Some(session) = self.transport_session.as_ref() {
+                            if let Some(transport) = self.command_transport.as_ref() {
                                 let send_result = {
                                     let runtime = self.network_runtime.get_or_insert_with(|| {
                                         TokioRuntimeBuilder::new_current_thread()
@@ -734,7 +739,8 @@ impl Engine {
                                             .build()
                                             .expect("create network runtime")
                                     });
-                                    runtime.block_on(session.send_command_packets(&packets_to_send))
+                                    runtime
+                                        .block_on(transport.send_command_packets(&packets_to_send))
                                 };
 
                                 if let Err(err) = send_result {
@@ -750,8 +756,9 @@ impl Engine {
                                     }
                                 } else {
                                     log::debug!(
-                                        "[commands] transmitted {} queued packets via QUIC",
-                                        packets_to_send.len()
+                                        "[commands] transmitted {} queued packets via {:?}",
+                                        packets_to_send.len(),
+                                        transport.kind()
                                     );
                                 }
                             } else {
@@ -845,8 +852,8 @@ impl Engine {
 
     #[cfg(feature = "network-quic")]
     fn receive_next_command_packet(&mut self) -> Result<Option<CommandPacket>, TransportError> {
-        let session = match self.transport_session.as_ref() {
-            Some(session) => session,
+        let transport = match self.command_transport.as_ref() {
+            Some(transport) => transport,
             None => return Ok(None),
         };
 
@@ -857,7 +864,7 @@ impl Engine {
                 .expect("create network runtime")
         });
 
-        runtime.block_on(session.receive_command_packet(Duration::from_millis(0)))
+        runtime.block_on(transport.receive_command_packet(Duration::from_millis(0)))
     }
 
     #[cfg_attr(not(any(feature = "network-quic", test)), allow(dead_code))]
