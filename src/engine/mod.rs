@@ -3101,24 +3101,24 @@ impl Engine {
             }
         }
 
-        if let Some(handle) = transport.voice_metrics_handle() {
-            if let Some(session) = self.voice_session.as_ref() {
-                let metrics = session.metrics().clone();
-                handle.update(|diag| {
-                    diag.packets_received = metrics.total_packets();
-                    diag.voiced_frames = metrics.voiced_frames();
-                    diag.packets_dropped = metrics.dropped_packets();
-                    if bytes_this_tick > 0 {
-                        diag.bytes_received = diag.bytes_received.saturating_add(bytes_this_tick);
-                        let bits_per_second = (bytes_this_tick as f32 * 8.0)
-                            * (1000.0 / VOICE_FRAME_DURATION_MS as f32);
-                        diag.bitrate_kbps = bits_per_second / 1000.0;
-                    }
-                    if let Some(latency) = latest_latency_ms {
-                        diag.latency_ms = latency;
-                    }
-                });
-            }
+        if let Some(handle) = transport.voice_metrics_handle()
+            && let Some(session) = self.voice_session.as_ref()
+        {
+            let metrics = session.metrics().clone();
+            handle.update(|diag| {
+                diag.packets_received = metrics.total_packets();
+                diag.voiced_frames = metrics.voiced_frames();
+                diag.packets_dropped = metrics.dropped_packets();
+                if bytes_this_tick > 0 {
+                    diag.bytes_received = diag.bytes_received.saturating_add(bytes_this_tick);
+                    let bits_per_second =
+                        (bytes_this_tick as f32 * 8.0) * (1000.0 / VOICE_FRAME_DURATION_MS as f32);
+                    diag.bitrate_kbps = bits_per_second / 1000.0;
+                }
+                if let Some(latency) = latest_latency_ms {
+                    diag.latency_ms = latency;
+                }
+            });
         }
     }
 
