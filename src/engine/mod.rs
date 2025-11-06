@@ -19,6 +19,8 @@ use crate::editor::{CommandOutbox, CommandTransportQueue};
 use crate::network::EntityHandle;
 use crate::network::command_log::{CommandBatch, CommandEntry, CommandPacket, CommandScope};
 #[cfg(feature = "network-quic")]
+use crate::network::current_time_millis;
+#[cfg(feature = "network-quic")]
 use crate::network::signaling::{
     IceCandidate, PeerId, RoomId, SessionDescription, SignalingClient, SignalingError,
     SignalingHandle, SignalingResponse, SignalingServer,
@@ -26,6 +28,11 @@ use crate::network::signaling::{
 #[cfg(feature = "network-quic")]
 use crate::network::transport::{
     CommandTransport, TransportError, TransportSession, WebRtcTransport,
+};
+#[cfg(feature = "network-quic")]
+use crate::network::voice::{
+    OpusCodec, VOICE_FRAME_DURATION_MS, VOICE_FRAME_SAMPLES, VOICE_SAMPLE_RATE_HZ, VoiceCodec,
+    VoicePacket, VoicePlayback, VoiceSession,
 };
 #[cfg(feature = "network-quic")]
 use crate::network::{TransportDiagnostics, TransportKind};
@@ -41,6 +48,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "network-quic")]
 use std::env;
+#[cfg(feature = "network-quic")]
+use std::f32::consts::TAU;
 #[cfg(feature = "network-quic")]
 use std::net::{IpAddr, SocketAddr};
 #[cfg(feature = "network-quic")]
@@ -108,6 +117,18 @@ const WEBRTC_NEGOTIATION_STALE_AFTER: Duration = Duration::from_secs(30);
 const WEBRTC_ICE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(feature = "network-quic")]
 const WEBRTC_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+#[cfg(feature = "network-quic")]
+const VOICE_JITTER_BUFFER_CAPACITY: usize = 16;
+#[cfg(feature = "network-quic")]
+const VOICE_VAD_THRESHOLD: f32 = 0.05;
+#[cfg(feature = "network-quic")]
+const VOICE_PACKET_DRAIN_LIMIT: usize = 16;
+#[cfg(feature = "network-quic")]
+const VOICE_SYNTH_FREQUENCY_HZ: f32 = 440.0;
+#[cfg(feature = "network-quic")]
+const VOICE_SYNTH_AMPLITUDE: f32 = 0.25;
+#[cfg(feature = "network-quic")]
+const VOICE_SEND_INTERVAL: Duration = Duration::from_millis(VOICE_FRAME_DURATION_MS as u64);
 
 pub struct Engine {
     scheduler: Scheduler,
@@ -124,7 +145,7 @@ pub struct Engine {
     #[cfg(feature = "network-quic")]
     command_transport_fallback: Option<CommandTransport>,
     #[cfg(feature = "network-quic")]
-    network_runtime: Option<TokioRuntime>,
+    network_runtime: Option<Arc<TokioRuntime>>,
     #[cfg(feature = "network-quic")]
     signaling_handle: Option<SignalingHandle>,
     #[cfg(feature = "network-quic")]
@@ -149,6 +170,22 @@ pub struct Engine {
     active_webrtc_peer: Option<PeerId>,
     #[cfg(feature = "network-quic")]
     webrtc_ice_servers: Vec<IceServerConfig>,
+    #[cfg(feature = "network-quic")]
+    voice_encoder: Option<OpusCodec>,
+    #[cfg(feature = "network-quic")]
+    voice_session: Option<VoiceSession<OpusCodec>>,
+    #[cfg(feature = "network-quic")]
+    voice_playback: Option<VoicePlayback>,
+    #[cfg(feature = "network-quic")]
+    voice_playback_failed: bool,
+    #[cfg(feature = "network-quic")]
+    voice_last_send: Instant,
+    #[cfg(feature = "network-quic")]
+    voice_sequence: u64,
+    #[cfg(feature = "network-quic")]
+    voice_phase: f32,
+    #[cfg(feature = "network-quic")]
+    voice_synthesis_enabled: bool,
 }
 
 impl Engine {
@@ -167,6 +204,10 @@ impl Engine {
         let command_pipeline = Arc::new(Mutex::new(CommandPipeline::new()));
         #[cfg(feature = "network-quic")]
         let (webrtc_event_tx, webrtc_event_rx) = unbounded_channel();
+        #[cfg(feature = "network-quic")]
+        let voice_last_send = Instant::now()
+            .checked_sub(VOICE_SEND_INTERVAL)
+            .unwrap_or_else(Instant::now);
 
         let mut engine = Self {
             scheduler,
@@ -208,6 +249,22 @@ impl Engine {
             active_webrtc_peer: None,
             #[cfg(feature = "network-quic")]
             webrtc_ice_servers: load_webrtc_ice_servers(),
+            #[cfg(feature = "network-quic")]
+            voice_encoder: None,
+            #[cfg(feature = "network-quic")]
+            voice_session: None,
+            #[cfg(feature = "network-quic")]
+            voice_playback: None,
+            #[cfg(feature = "network-quic")]
+            voice_playback_failed: false,
+            #[cfg(feature = "network-quic")]
+            voice_last_send,
+            #[cfg(feature = "network-quic")]
+            voice_sequence: 0,
+            #[cfg(feature = "network-quic")]
+            voice_phase: 0.0,
+            #[cfg(feature = "network-quic")]
+            voice_synthesis_enabled: true,
         };
 
         engine.register_core_systems();
@@ -228,11 +285,11 @@ impl Engine {
 
     #[cfg(feature = "network-quic")]
     pub fn attach_command_transport(&mut self, transport: CommandTransport) {
+        self.ensure_network_runtime();
         if let Ok(mut pipeline) = self.command_pipeline.lock() {
             pipeline.attach_transport_metrics(transport.metrics_handle());
         }
 
-        self.ensure_network_runtime();
         self.command_transport = Some(transport);
     }
 
@@ -244,6 +301,11 @@ impl Engine {
     #[cfg(feature = "network-quic")]
     pub fn attach_webrtc_transport(&mut self, transport: WebRtcTransport) {
         self.attach_command_transport(CommandTransport::from(transport));
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn set_network_runtime(&mut self, runtime: Arc<TokioRuntime>) {
+        self.network_runtime = Some(runtime);
     }
 
     #[cfg(feature = "network-quic")]
@@ -262,21 +324,10 @@ impl Engine {
         self.local_signaling_peer = None;
         self.signaling_room = None;
 
-        let server = {
-            let runtime = self
-                .network_runtime
-                .as_mut()
-                .expect("network runtime should exist");
-            runtime.block_on(SignalingServer::bind(addr))?
-        };
+        let runtime = self.ensure_network_runtime();
+        let server = runtime.block_on(SignalingServer::bind(addr))?;
         let local_addr = server.local_addr();
-        let handle = {
-            let runtime = self
-                .network_runtime
-                .as_mut()
-                .expect("network runtime should exist");
-            runtime.block_on(async move { server.start() })
-        };
+        let handle = runtime.block_on(async move { server.start() });
         self.signaling_handle = Some(handle);
         Ok(local_addr)
     }
@@ -322,21 +373,10 @@ impl Engine {
         room_id: RoomId,
         timeout: Duration,
     ) -> Result<Vec<PeerId>, SignalingError> {
-        self.ensure_network_runtime();
-        let mut client = {
-            let runtime = self
-                .network_runtime
-                .as_mut()
-                .expect("network runtime should exist");
-            runtime.block_on(SignalingClient::connect(endpoint, peer_id.clone(), room_id))?
-        };
-        let peers = {
-            let runtime = self
-                .network_runtime
-                .as_mut()
-                .expect("network runtime should exist");
-            runtime.block_on(client.register(timeout))?
-        };
+        let runtime = self.ensure_network_runtime();
+        let mut client =
+            runtime.block_on(SignalingClient::connect(endpoint, peer_id.clone(), room_id))?;
+        let peers = runtime.block_on(client.register(timeout))?;
         let client = Arc::new(TokioMutex::new(client));
         self.signaling_clients.insert(peer_id, client);
         Ok(peers)
@@ -479,7 +519,6 @@ impl Engine {
     pub fn world(&self) -> &crate::ecs::World {
         self.scheduler.world()
     }
-
     pub fn telemetry_entity(&self) -> Option<crate::ecs::Entity> {
         self.telemetry_entity
     }
@@ -714,19 +753,20 @@ impl Engine {
 
 #[cfg(feature = "network-quic")]
 impl Engine {
-    fn ensure_network_runtime(&mut self) -> &mut TokioRuntime {
+    fn ensure_network_runtime(&mut self) -> Arc<TokioRuntime> {
         if self.network_runtime.is_none() {
-            self.network_runtime = Some(
+            self.network_runtime = Some(Arc::new(
                 TokioRuntimeBuilder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("create network runtime"),
-            );
+            ));
         }
 
         self.network_runtime
-            .as_mut()
+            .as_ref()
             .expect("network runtime should exist")
+            .clone()
     }
 
     fn build_rtc_configuration(&self) -> RTCConfiguration {
@@ -768,6 +808,7 @@ impl Engine {
     fn install_active_transport(&mut self, transport: CommandTransport) -> TransportKind {
         let kind = transport.kind();
         let metrics = transport.metrics_handle();
+
         if let Ok(mut pipeline) = self.command_pipeline.lock() {
             pipeline.attach_transport_metrics(metrics);
         }
@@ -1917,21 +1958,21 @@ fn hook_transport_emitter(
         })
     }));
 
-    if channel.ready_state() == RTCDataChannelState::Open {
-        if let Some((command_channel, voice_channel)) = try_promote_webrtc_transport(
+    if channel.ready_state() == RTCDataChannelState::Open
+        && let Some((command_channel, voice_channel)) = try_promote_webrtc_transport(
             &bundles,
             &peer_id,
             channel_label.as_str(),
             Arc::clone(&channel),
-        ) {
-            let transport =
-                WebRtcTransport::from_parts(connection, command_channel, Some(voice_channel));
-            if event_tx
-                .send(WebRtcRuntimeEvent::TransportEstablished { peer_id, transport })
-                .is_err()
-            {
-                log::warn!("[webrtc] transport event dropped; engine likely shutting down");
-            }
+        )
+    {
+        let transport =
+            WebRtcTransport::from_parts(connection, command_channel, Some(voice_channel));
+        if event_tx
+            .send(WebRtcRuntimeEvent::TransportEstablished { peer_id, transport })
+            .is_err()
+        {
+            log::warn!("[webrtc] transport event dropped; engine likely shutting down");
         }
     }
 }
@@ -2432,6 +2473,9 @@ impl Engine {
         self.drain_webrtc_runtime_events();
 
         #[cfg(feature = "network-quic")]
+        self.tick_voice_channels();
+
+        #[cfg(feature = "network-quic")]
         let webrtc_metrics = {
             self.tick_webrtc_negotiation();
             self.snapshot_webrtc_metrics()
@@ -2485,6 +2529,12 @@ impl Engine {
                 stats.controller_trigger,
             ));
         }
+
+        #[cfg(feature = "network-quic")]
+        let mut packets_ready_for_transport: Option<(
+            Vec<CommandPacket>,
+            crate::ecs::Entity,
+        )> = None;
 
         if let Ok(mut pipeline) = self.command_pipeline.lock() {
             let packets = pipeline.drain_packets();
@@ -2567,43 +2617,7 @@ impl Engine {
 
                         #[cfg(feature = "network-quic")]
                         if let Some(packets_to_send) = pending_dispatch {
-                            if let Some(transport) = self.command_transport.as_ref() {
-                                let send_result = {
-                                    let runtime = self.network_runtime.get_or_insert_with(|| {
-                                        TokioRuntimeBuilder::new_current_thread()
-                                            .enable_all()
-                                            .build()
-                                            .expect("create network runtime")
-                                    });
-                                    runtime
-                                        .block_on(transport.send_command_packets(&packets_to_send))
-                                };
-
-                                if let Err(err) = send_result {
-                                    log::error!(
-                                        "[commands] failed to transmit {} packets: {err}",
-                                        packets_to_send.len()
-                                    );
-                                    let world = self.scheduler.world_mut();
-                                    if let Some(queue) =
-                                        world.get_mut::<CommandTransportQueue>(entity)
-                                    {
-                                        queue.enqueue(packets_to_send);
-                                    }
-                                } else {
-                                    log::debug!(
-                                        "[commands] transmitted {} queued packets via {:?}",
-                                        packets_to_send.len(),
-                                        transport.kind()
-                                    );
-                                }
-                            } else {
-                                let world = self.scheduler.world_mut();
-                                if let Some(queue) = world.get_mut::<CommandTransportQueue>(entity)
-                                {
-                                    queue.enqueue(packets_to_send);
-                                }
-                            }
+                            packets_ready_for_transport = Some((packets_to_send, entity));
                         }
                     }
                 }
@@ -2620,6 +2634,39 @@ impl Engine {
             }
 
             command_metrics_snapshot = Some(pipeline.metrics_snapshot());
+        }
+
+        #[cfg(feature = "network-quic")]
+        if let Some((packets_to_send, entity)) = packets_ready_for_transport {
+            if self.command_transport.is_some() {
+                let runtime = self.ensure_network_runtime();
+                if let Some(transport) = self.command_transport.as_ref() {
+                    let send_result =
+                        runtime.block_on(transport.send_command_packets(&packets_to_send));
+
+                    if let Err(err) = send_result {
+                        log::error!(
+                            "[commands] failed to transmit {} packets: {err}",
+                            packets_to_send.len()
+                        );
+                        let world = self.scheduler.world_mut();
+                        if let Some(queue) = world.get_mut::<CommandTransportQueue>(entity) {
+                            queue.enqueue(packets_to_send.iter().cloned());
+                        }
+                    } else {
+                        log::debug!(
+                            "[commands] transmitted {} queued packets via {:?}",
+                            packets_to_send.len(),
+                            transport.kind()
+                        );
+                    }
+                }
+            } else {
+                let world = self.scheduler.world_mut();
+                if let Some(queue) = world.get_mut::<CommandTransportQueue>(entity) {
+                    queue.enqueue(packets_to_send.iter().cloned());
+                }
+            }
         }
 
         if let Some(sample) = telemetry_sample.as_mut() {
@@ -2690,17 +2737,11 @@ impl Engine {
 
     #[cfg(feature = "network-quic")]
     fn receive_next_command_packet(&mut self) -> Result<Option<CommandPacket>, TransportError> {
+        let runtime = self.ensure_network_runtime();
         let transport = match self.command_transport.as_ref() {
             Some(transport) => transport,
             None => return Ok(None),
         };
-
-        let runtime = self.network_runtime.get_or_insert_with(|| {
-            TokioRuntimeBuilder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("create network runtime")
-        });
 
         runtime.block_on(transport.receive_command_packet(Duration::from_millis(0)))
     }
@@ -2870,6 +2911,213 @@ impl Engine {
                     self.record_local_ice_candidate(&peer_id, &candidate);
                 }
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    #[cfg(feature = "network-quic")]
+    fn tick_voice_channels(&mut self) {
+        if !matches!(self.command_transport, Some(CommandTransport::WebRtc(_))) {
+            self.voice_encoder = None;
+            self.voice_session = None;
+            if !self.voice_playback_failed {
+                self.voice_playback = None;
+            }
+            return;
+        }
+
+        if self.voice_encoder.is_none() {
+            match OpusCodec::mono() {
+                Ok(codec) => self.voice_encoder = Some(codec),
+                Err(err) => {
+                    log::error!("[voice] failed to initialize Opus encoder: {err:?}");
+                    return;
+                }
+            }
+        }
+
+        if self.voice_session.is_none() {
+            match OpusCodec::mono() {
+                Ok(codec) => {
+                    self.voice_session = Some(VoiceSession::new(
+                        codec,
+                        VOICE_JITTER_BUFFER_CAPACITY,
+                        VOICE_VAD_THRESHOLD,
+                    ));
+                }
+                Err(err) => {
+                    log::error!("[voice] failed to initialize Opus decoder: {err:?}");
+                    return;
+                }
+            }
+        }
+
+        if self.voice_playback.is_none() && !self.voice_playback_failed {
+            match VoicePlayback::new() {
+                Ok(playback) => {
+                    if playback.is_active() {
+                        log::info!(
+                            "[voice] playback ready ({} Hz, {} ch)",
+                            playback.sample_rate(),
+                            playback.channels()
+                        );
+                    } else {
+                        log::warn!("[voice] no audio device detected; remote voice will be muted");
+                    }
+                    self.voice_playback = Some(playback);
+                }
+                Err(err) => {
+                    log::error!("[voice] failed to configure audio playback: {}", err.0);
+                    self.voice_playback_failed = true;
+                }
+            }
+        }
+
+        if self.voice_synthesis_enabled {
+            self.synthesize_and_send_voice();
+        }
+
+        self.drain_incoming_voice();
+    }
+
+    #[cfg(feature = "network-quic")]
+    fn synthesize_and_send_voice(&mut self) {
+        let Some(encoder) = self.voice_encoder.as_mut() else {
+            return;
+        };
+
+        let now = Instant::now();
+        if now
+            .checked_duration_since(self.voice_last_send)
+            .map(|elapsed| elapsed < VOICE_SEND_INTERVAL)
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let mut frame = vec![0i16; VOICE_FRAME_SAMPLES];
+        let phase_step = TAU * VOICE_SYNTH_FREQUENCY_HZ / VOICE_SAMPLE_RATE_HZ as f32;
+        let amplitude = (VOICE_SYNTH_AMPLITUDE * i16::MAX as f32).clamp(0.0, i16::MAX as f32);
+
+        for sample in frame.iter_mut() {
+            *sample = (self.voice_phase.sin() * amplitude).round() as i16;
+            self.voice_phase += phase_step;
+            if self.voice_phase >= TAU {
+                self.voice_phase -= TAU;
+            }
+        }
+
+        let encoded = match encoder.encode(&frame) {
+            Ok(encoded) => encoded,
+            Err(err) => {
+                log::debug!("[voice] encode error: {err:?}");
+                return;
+            }
+        };
+
+        let bytes_sent = encoded.len() as u64;
+        let sequence = self.voice_sequence;
+        self.voice_sequence = self.voice_sequence.wrapping_add(1);
+        let timestamp_ms = current_time_millis();
+        let packet = VoicePacket::new(sequence, timestamp_ms, encoded);
+
+        let runtime = self.ensure_network_runtime();
+        let transport = match self.command_transport.as_ref() {
+            Some(CommandTransport::WebRtc(transport)) => transport,
+            _ => return,
+        };
+
+        match runtime.block_on(transport.send_voice_packet(&packet)) {
+            Ok(()) => {
+                self.voice_last_send = now;
+                if let Some(handle) = transport.voice_metrics_handle() {
+                    handle.update(|diag| {
+                        diag.packets_sent = diag.packets_sent.saturating_add(1);
+                        diag.bytes_sent = diag.bytes_sent.saturating_add(bytes_sent);
+                        diag.voiced_frames = diag.voiced_frames.saturating_add(1);
+                        let bits_per_second =
+                            (bytes_sent as f32 * 8.0) * (1000.0 / VOICE_FRAME_DURATION_MS as f32);
+                        diag.bitrate_kbps = bits_per_second / 1000.0;
+                    });
+                }
+            }
+            Err(TransportError::Unsupported(reason)) => {
+                log::warn!(
+                    "[voice] transport does not support voice ({reason}); disabling synthesis"
+                );
+                self.voice_synthesis_enabled = false;
+            }
+            Err(err) => {
+                log::debug!("[voice] failed to send voice packet: {err}");
+            }
+        }
+    }
+
+    #[cfg(feature = "network-quic")]
+    fn drain_incoming_voice(&mut self) {
+        let runtime = self.ensure_network_runtime();
+
+        let transport = match self.command_transport.as_ref() {
+            Some(CommandTransport::WebRtc(transport)) => transport,
+            _ => return,
+        };
+
+        let mut bytes_this_tick = 0u64;
+        let mut latest_latency_ms: Option<f32> = None;
+
+        for _ in 0..VOICE_PACKET_DRAIN_LIMIT {
+            let packet =
+                match runtime.block_on(transport.receive_voice_packet(Duration::from_millis(0))) {
+                    Ok(Some(packet)) => packet,
+                    Ok(None) => break,
+                    Err(TransportError::Unsupported(_)) => break,
+                    Err(err) => {
+                        log::debug!("[voice] receive error: {err}");
+                        break;
+                    }
+                };
+
+            bytes_this_tick = bytes_this_tick.saturating_add(packet.payload.len() as u64);
+            let now_ms = current_time_millis();
+            latest_latency_ms = Some(now_ms.saturating_sub(packet.timestamp_ms) as f32);
+
+            if let Some(session) = self.voice_session.as_mut() {
+                session.enqueue_packet(packet);
+
+                loop {
+                    match session.dequeue_samples() {
+                        Ok(Some(samples)) => {
+                            if let Some(playback) = self.voice_playback.as_ref() {
+                                playback.queue_samples(&samples, 1);
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(err) => {
+                            log::debug!("[voice] decode error: {err:?}");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(handle) = transport.voice_metrics_handle() {
+            if let Some(session) = self.voice_session.as_ref() {
+                let metrics = session.metrics().clone();
+                handle.update(|diag| {
+                    diag.packets_received = metrics.total_packets();
+                    diag.voiced_frames = metrics.voiced_frames();
+                    diag.packets_dropped = metrics.dropped_packets();
+                    if bytes_this_tick > 0 {
+                        diag.bytes_received = diag.bytes_received.saturating_add(bytes_this_tick);
+                        let bits_per_second = (bytes_this_tick as f32 * 8.0)
+                            * (1000.0 / VOICE_FRAME_DURATION_MS as f32);
+                        diag.bitrate_kbps = bits_per_second / 1000.0;
+                    }
+                    if let Some(latency) = latest_latency_ms {
+                        diag.latency_ms = latency;
+                    }
+                });
             }
         }
     }

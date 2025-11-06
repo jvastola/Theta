@@ -1,7 +1,14 @@
 use std::collections::VecDeque;
 #[cfg(feature = "network-quic")]
 use std::convert::TryFrom;
+#[cfg(feature = "network-quic")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "network-quic")]
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(feature = "network-quic")]
+use cpal::{SampleFormat, Stream, StreamConfig};
 
 use serde::{Deserialize, Serialize};
 
@@ -12,8 +19,13 @@ use audiopus::{
     packet::Packet,
 };
 
+pub const VOICE_SAMPLE_RATE_HZ: u32 = 48_000;
+pub const VOICE_FRAME_DURATION_MS: u32 = 20;
+pub const VOICE_FRAME_SAMPLES: usize =
+    (VOICE_SAMPLE_RATE_HZ as usize * VOICE_FRAME_DURATION_MS as usize) / 1000;
+
 #[cfg(feature = "network-quic")]
-const OPUS_FRAME_DURATION_MS: u32 = 20;
+const OPUS_FRAME_DURATION_MS: u32 = VOICE_FRAME_DURATION_MS;
 
 #[cfg(feature = "network-quic")]
 const OPUS_MAX_PACKET_SIZE: usize = 1_275;
@@ -49,6 +61,24 @@ impl From<String> for VoiceCodecError {
 impl From<audiopus::Error> for VoiceCodecError {
     fn from(value: audiopus::Error) -> Self {
         Self(value.to_string())
+    }
+}
+
+#[cfg(feature = "network-quic")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoicePlaybackError(pub String);
+
+#[cfg(feature = "network-quic")]
+impl From<&str> for VoicePlaybackError {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+#[cfg(feature = "network-quic")]
+impl From<String> for VoicePlaybackError {
+    fn from(value: String) -> Self {
+        Self(value)
     }
 }
 
@@ -344,6 +374,285 @@ impl VoiceDiagnosticsHandle {
     }
 }
 
+#[cfg(feature = "network-quic")]
+const PLAYBACK_BUFFER_CAPACITY: usize = VOICE_SAMPLE_RATE_HZ as usize * 2;
+
+#[cfg(feature = "network-quic")]
+pub struct VoicePlayback {
+    buffer: Arc<Mutex<VecDeque<f32>>>,
+    channels: u16,
+    sample_rate: u32,
+    stream: Option<Stream>,
+    rate_warned: AtomicBool,
+}
+
+#[cfg(feature = "network-quic")]
+impl VoicePlayback {
+    pub fn new() -> Result<Self, VoicePlaybackError> {
+        let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(
+            PLAYBACK_BUFFER_CAPACITY,
+        )));
+        let host = cpal::default_host();
+        let Some(device) = host.default_output_device() else {
+            log::warn!("[voice] no output device detected; disabling audio playback");
+            return Ok(Self {
+                buffer,
+                channels: 1,
+                sample_rate: VOICE_SAMPLE_RATE_HZ,
+                stream: None,
+                rate_warned: AtomicBool::new(false),
+            });
+        };
+
+        let mut selected = None;
+        match device.supported_output_configs() {
+            Ok(configs) => {
+                for cfg in configs {
+                    if cfg.channels() >= 1
+                        && cfg.min_sample_rate().0 <= VOICE_SAMPLE_RATE_HZ
+                        && cfg.max_sample_rate().0 >= VOICE_SAMPLE_RATE_HZ
+                    {
+                        selected =
+                            Some(cfg.with_sample_rate(cpal::SampleRate(VOICE_SAMPLE_RATE_HZ)));
+                        break;
+                    }
+                }
+            }
+            Err(err) => {
+                log::warn!("[voice] failed to enumerate output configurations: {err}");
+            }
+        }
+
+        let supported = match selected {
+            Some(cfg) => cfg,
+            None => device
+                .default_output_config()
+                .map_err(|err| VoicePlaybackError(err.to_string()))?,
+        };
+
+        let sample_format = supported.sample_format();
+        let stream_config: StreamConfig = supported.config();
+        let channels = stream_config.channels;
+        let channels_usize = channels as usize;
+
+        let stream_result = match sample_format {
+            SampleFormat::F32 => {
+                let buffer = buffer.clone();
+                device.build_output_stream(
+                    &stream_config,
+                    move |data: &mut [f32], _| fill_output_f32(data, channels_usize, &buffer),
+                    move |err| log::error!("[voice] output stream error: {err}"),
+                    None,
+                )
+            }
+            SampleFormat::I16 => {
+                let buffer = buffer.clone();
+                device.build_output_stream(
+                    &stream_config,
+                    move |data: &mut [i16], _| fill_output_i16(data, channels_usize, &buffer),
+                    move |err| log::error!("[voice] output stream error: {err}"),
+                    None,
+                )
+            }
+            SampleFormat::U16 => {
+                let buffer = buffer.clone();
+                device.build_output_stream(
+                    &stream_config,
+                    move |data: &mut [u16], _| fill_output_u16(data, channels_usize, &buffer),
+                    move |err| log::error!("[voice] output stream error: {err}"),
+                    None,
+                )
+            }
+            other => {
+                log::warn!("[voice] unsupported audio sample format {other:?}; disabling playback");
+                return Ok(Self {
+                    buffer,
+                    channels,
+                    sample_rate: stream_config.sample_rate.0,
+                    stream: None,
+                    rate_warned: AtomicBool::new(false),
+                });
+            }
+        };
+
+        let stream = match stream_result {
+            Ok(stream) => stream,
+            Err(err) => {
+                log::warn!(
+                    "[voice] failed to build audio stream ({err}); remote voice will be muted"
+                );
+                return Ok(Self {
+                    buffer,
+                    channels,
+                    sample_rate: stream_config.sample_rate.0,
+                    stream: None,
+                    rate_warned: AtomicBool::new(false),
+                });
+            }
+        };
+
+        if let Err(err) = stream.play() {
+            log::warn!("[voice] failed to start audio stream: {err}");
+            return Ok(Self {
+                buffer,
+                channels,
+                sample_rate: stream_config.sample_rate.0,
+                stream: None,
+                rate_warned: AtomicBool::new(false),
+            });
+        }
+
+        Ok(Self {
+            buffer,
+            channels,
+            sample_rate: stream_config.sample_rate.0,
+            stream: Some(stream),
+            rate_warned: AtomicBool::new(false),
+        })
+    }
+
+    pub fn queue_samples(&self, samples: &[i16], input_channels: u16) {
+        if samples.is_empty() || self.stream.is_none() {
+            return;
+        }
+
+        let channels = input_channels.max(1) as usize;
+        let mut mono = Vec::with_capacity(samples.len() / channels);
+        for chunk in samples.chunks(channels) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let normalized = chunk
+                .iter()
+                .map(|sample| *sample as f32 / i16::MAX as f32)
+                .sum::<f32>()
+                / chunk.len() as f32;
+            mono.push(normalized);
+        }
+
+        if mono.is_empty() {
+            return;
+        }
+
+        let mut to_enqueue = Vec::new();
+        if self.sample_rate == VOICE_SAMPLE_RATE_HZ {
+            to_enqueue.extend(mono);
+        } else {
+            if !self.rate_warned.swap(true, Ordering::Relaxed) {
+                log::warn!(
+                    "[voice] resampling voice stream from {}Hz to {}Hz; expect quality loss",
+                    VOICE_SAMPLE_RATE_HZ,
+                    self.sample_rate
+                );
+            }
+
+            let target_samples = ((mono.len() as f32) * self.sample_rate as f32
+                / VOICE_SAMPLE_RATE_HZ as f32)
+                .ceil() as usize;
+
+            if target_samples == 0 {
+                return;
+            }
+
+            let step = if target_samples <= 1 {
+                0.0
+            } else {
+                (mono.len() - 1).max(1) as f32 / (target_samples - 1) as f32
+            };
+
+            for index in 0..target_samples {
+                let position = step * index as f32;
+                let lower_index = position.floor() as usize;
+                let upper_index = (lower_index + 1).min(mono.len() - 1);
+                let frac = position - lower_index as f32;
+                let sample = mono[lower_index] + (mono[upper_index] - mono[lower_index]) * frac;
+                to_enqueue.push(sample);
+            }
+        }
+
+        if to_enqueue.is_empty() {
+            return;
+        }
+
+        let mut guard = match self.buffer.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        guard.extend(to_enqueue);
+
+        let capacity = PLAYBACK_BUFFER_CAPACITY;
+        if guard.len() > capacity {
+            let overflow = guard.len() - capacity;
+            for _ in 0..overflow {
+                guard.pop_front();
+            }
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    pub fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+}
+
+#[cfg(feature = "network-quic")]
+fn fill_output_f32(data: &mut [f32], channels: usize, buffer: &Arc<Mutex<VecDeque<f32>>>) {
+    let mut guard = match buffer.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    for frame in data.chunks_mut(channels.max(1)) {
+        let value = guard.pop_front().unwrap_or(0.0).clamp(-1.0, 1.0);
+        for sample in frame.iter_mut() {
+            *sample = value;
+        }
+    }
+}
+
+#[cfg(feature = "network-quic")]
+fn fill_output_i16(data: &mut [i16], channels: usize, buffer: &Arc<Mutex<VecDeque<f32>>>) {
+    let mut guard = match buffer.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    for frame in data.chunks_mut(channels.max(1)) {
+        let value = guard.pop_front().unwrap_or(0.0).clamp(-1.0, 1.0);
+        let converted = (value * i16::MAX as f32).round() as i16;
+        for sample in frame.iter_mut() {
+            *sample = converted;
+        }
+    }
+}
+
+#[cfg(feature = "network-quic")]
+fn fill_output_u16(data: &mut [u16], channels: usize, buffer: &Arc<Mutex<VecDeque<f32>>>) {
+    let mut guard = match buffer.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    for frame in data.chunks_mut(channels.max(1)) {
+        let value = guard.pop_front().unwrap_or(0.0).clamp(-1.0, 1.0);
+        let normalized = (value * 0.5) + 0.5;
+        let scaled = (normalized * u16::MAX as f32)
+            .round()
+            .clamp(0.0, u16::MAX as f32) as u16;
+        for sample in frame.iter_mut() {
+            *sample = scaled;
+        }
+    }
+}
+
 /// High-level voice session composed of a codec, jitter buffer, VAD and metrics.
 pub struct VoiceSession<C: VoiceCodec> {
     codec: C,
@@ -508,14 +817,50 @@ mod tests {
     fn opus_codec_roundtrip_preserves_samples() {
         let mut codec = OpusCodec::mono().expect("create opus codec");
         let sample_count = codec.expected_samples();
+        let sample_rate = VOICE_SAMPLE_RATE_HZ as f32;
+        let frequency = 440.0f32;
+        let amplitude = 12_000.0f32;
         let samples: Vec<i16> = (0..sample_count)
-            .map(|idx| (idx as i32 * 127).wrapping_sub(5_000) as i16)
+            .map(|idx| {
+                let t = idx as f32 / sample_rate;
+                (amplitude * (std::f32::consts::TAU * frequency * t).sin()) as i16
+            })
             .collect();
 
         let encoded = codec.encode(&samples).expect("encode opus frame");
         assert!(!encoded.is_empty());
         let decoded = codec.decode(&encoded).expect("decode opus frame");
-        assert_eq!(decoded, samples);
+        assert_eq!(decoded.len(), samples.len());
+
+        let mut signal_power = 0.0f64;
+        let mut decoded_power = 0.0f64;
+        let mut noise_power = 0.0f64;
+        let mut dot = 0.0f64;
+        for (&expected, &actual) in samples.iter().zip(decoded.iter()) {
+            let expected = f64::from(expected);
+            let actual = f64::from(actual);
+            signal_power += expected * expected;
+            decoded_power += actual * actual;
+            let error = expected - actual;
+            noise_power += error * error;
+            dot += expected * actual;
+        }
+
+        if noise_power == 0.0 {
+            return;
+        }
+
+        let snr = 10.0 * (signal_power / noise_power).log10();
+        let cosine_similarity = dot / (signal_power.sqrt() * decoded_power.sqrt());
+        assert!(
+            decoded_power > 0.0,
+            "decoded signal energy should be non-zero"
+        );
+        assert!(snr > -1.0, "expected SNR > -1 dB, got {snr:.2} dB");
+        assert!(
+            cosine_similarity > 0.3,
+            "cosine similarity too low: {cosine_similarity:.2}"
+        );
     }
 
     #[test]

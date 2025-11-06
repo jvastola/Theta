@@ -14,29 +14,20 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-#[cfg(test)]
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-#[cfg(test)]
 use webrtc::api::interceptor_registry::register_default_interceptors;
-#[cfg(test)]
 use webrtc::api::media_engine::MediaEngine;
-#[cfg(test)]
 use webrtc::api::{API, APIBuilder};
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
-#[cfg(test)]
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 
-#[cfg(test)]
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
-#[cfg(test)]
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
-#[cfg(test)]
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-#[cfg(test)]
 use webrtc::peer_connection::configuration::RTCConfiguration;
 
 #[cfg(not(has_generated_network_schema))]
@@ -553,18 +544,16 @@ impl WebRtcTransport {
         let command_channel_for_open = Arc::clone(&command_channel);
         command_channel_for_open.on_open(Box::new(move || {
             let metrics = metrics_for_open.clone();
-            Box::pin(async move {
-                metrics.update(|m| m.kind = TransportKind::WebRtc);
-            })
+            metrics.update(|m| m.kind = TransportKind::WebRtc);
+            Box::pin(async {})
         }));
 
         let metrics_for_close = metrics.clone();
         let command_channel_for_close = Arc::clone(&command_channel);
         command_channel_for_close.on_close(Box::new(move || {
             let metrics = metrics_for_close.clone();
-            Box::pin(async move {
-                metrics.update(|m| m.kind = TransportKind::WebRtc);
-            })
+            metrics.update(|m| m.kind = TransportKind::WebRtc);
+            Box::pin(async {})
         }));
 
         let metrics_for_state = metrics.clone();
@@ -586,10 +575,9 @@ impl WebRtcTransport {
         let command_channel_for_messages = Arc::clone(&command_channel);
         command_channel_for_messages.on_message(Box::new(move |msg: DataChannelMessage| {
             let sender = command_msg_sender.clone();
-            Box::pin(async move {
-                let payload = msg.data.to_vec();
-                let _ = sender.send(payload);
-            })
+            let payload = msg.data.to_vec();
+            let _ = sender.send(payload);
+            Box::pin(async {})
         }));
 
         let (voice_inbox, voice_sender_arc) = if let Some(channel) = voice_channel.as_ref() {
@@ -601,32 +589,29 @@ impl WebRtcTransport {
             let voice_channel_for_open = Arc::clone(channel);
             voice_channel_for_open.on_open(Box::new(move || {
                 let metrics = metrics_for_open.clone();
-                Box::pin(async move {
-                    metrics.update(|m| {
-                        if !m.active_speakers.contains(&"local".to_string()) {
-                            m.active_speakers.push("local".to_string());
-                        }
-                    });
-                })
+                metrics.update(|m| {
+                    if !m.active_speakers.contains(&"local".to_string()) {
+                        m.active_speakers.push("local".to_string());
+                    }
+                });
+                Box::pin(async {})
             }));
 
             let metrics_for_close = voice_metrics.clone();
             let voice_channel_for_close = Arc::clone(channel);
             voice_channel_for_close.on_close(Box::new(move || {
                 let metrics = metrics_for_close.clone();
-                Box::pin(async move {
-                    metrics.update(|m| {
-                        m.active_speakers.retain(|speaker| speaker != "local");
-                    });
-                })
+                metrics.update(|m| {
+                    m.active_speakers.retain(|speaker| speaker != "local");
+                });
+                Box::pin(async {})
             }));
 
             let message_sender = Arc::clone(&sender);
             channel.on_message(Box::new(move |msg: DataChannelMessage| {
                 let sender = message_sender.clone();
-                Box::pin(async move {
-                    let _ = sender.send(msg.data.to_vec());
-                })
+                let _ = sender.send(msg.data.to_vec());
+                Box::pin(async {})
             }));
 
             (Some(inbox), Some(sender))
@@ -907,13 +892,11 @@ impl WebRtcTransport {
         }
     }
 
-    #[cfg(test)]
     pub async fn pair() -> Result<(Self, Self), TransportError> {
         create_loopback_webrtc_pair().await
     }
 }
 
-#[cfg(test)]
 fn build_webrtc_api() -> Result<API, TransportError> {
     let mut media_engine = MediaEngine::default();
 
@@ -927,7 +910,6 @@ fn build_webrtc_api() -> Result<API, TransportError> {
         .build())
 }
 
-#[cfg(test)]
 async fn create_loopback_webrtc_pair() -> Result<(WebRtcTransport, WebRtcTransport), TransportError>
 {
     let api = build_webrtc_api()?;
@@ -1060,7 +1042,6 @@ async fn create_loopback_webrtc_pair() -> Result<(WebRtcTransport, WebRtcTranspo
     Ok((offer_transport, answer_transport))
 }
 
-#[cfg(test)]
 fn forward_ice_candidates(source: &Arc<RTCPeerConnection>, destination: Arc<RTCPeerConnection>) {
     let (candidate_tx, mut candidate_rx) =
         tokio::sync::mpsc::unbounded_channel::<RTCIceCandidateInit>();
@@ -1084,7 +1065,6 @@ fn forward_ice_candidates(source: &Arc<RTCPeerConnection>, destination: Arc<RTCP
     });
 }
 
-#[cfg(test)]
 async fn wait_for_channel_open(channel: &Arc<RTCDataChannel>) {
     for _ in 0..500 {
         if channel.ready_state() == RTCDataChannelState::Open {
@@ -1139,6 +1119,25 @@ impl CommandTransport {
         match self {
             CommandTransport::Quic(session) => session.receive_command_packet(timeout).await,
             CommandTransport::WebRtc(transport) => transport.receive_command_packet(timeout).await,
+        }
+    }
+
+    pub async fn send_voice_packet(&self, packet: &VoicePacket) -> Result<(), TransportError> {
+        match self {
+            CommandTransport::Quic(_) => Err(TransportError::Unsupported(
+                "voice channel not available on QUIC transport",
+            )),
+            CommandTransport::WebRtc(transport) => transport.send_voice_packet(packet).await,
+        }
+    }
+
+    pub async fn receive_voice_packet(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<VoicePacket>, TransportError> {
+        match self {
+            CommandTransport::Quic(_) => Ok(None),
+            CommandTransport::WebRtc(transport) => transport.receive_voice_packet(timeout).await,
         }
     }
 
