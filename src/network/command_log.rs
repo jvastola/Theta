@@ -2,6 +2,8 @@ use crate::network::EntityHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::Error as JsonError;
 use std::collections::{BTreeMap, HashMap};
+#[cfg(feature = "command-log-persistence")]
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -323,7 +325,7 @@ impl Default for CommandLogConfig {
 }
 
 #[cfg(feature = "command-log-persistence")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ReplayPersistenceConfig {
     handle: Option<Arc<dyn ReplayPersistence>>,
 }
@@ -349,6 +351,15 @@ impl ReplayPersistenceConfig {
 impl Default for ReplayPersistenceConfig {
     fn default() -> Self {
         Self::disabled()
+    }
+}
+
+#[cfg(feature = "command-log-persistence")]
+impl fmt::Debug for ReplayPersistenceConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReplayPersistenceConfig")
+            .field("enabled", &self.handle.is_some())
+            .finish()
     }
 }
 

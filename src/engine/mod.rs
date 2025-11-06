@@ -815,13 +815,12 @@ impl Engine {
 
     #[cfg(feature = "network-quic")]
     fn poll_remote_commands(&mut self) {
-        let session = match self.transport_session.as_ref() {
-            Some(session) => session,
-            None => return,
-        };
-
         loop {
             let packet_result = {
+                let session = match self.transport_session.as_ref() {
+                    Some(session) => session,
+                    None => return,
+                };
                 let runtime = self.network_runtime.get_or_insert_with(|| {
                     TokioRuntimeBuilder::new_current_thread()
                         .enable_all()

@@ -1,6 +1,4 @@
-#![cfg(feature = "network-quic")]
-
-use super::{TransportDiagnostics, current_time_millis};
+use super::{current_time_millis, TransportDiagnostics};
 use crate::network::command_log::CommandPacket;
 use crate::network::wire;
 use ed25519_dalek::SigningKey;
@@ -492,13 +490,14 @@ fn parse_session_hello(
     }
     let capabilities = hello
         .requested_capabilities()
-        .map(|vec| vec.iter().collect())
+        .map(|vec| vec.iter().copied().collect::<Vec<u32>>())
         .unwrap_or_default();
     let public_key_bytes: Vec<u8> = hello
         .client_public_key()
         .ok_or_else(|| TransportError::Handshake("missing client public key".into()))?
-        .iter()
-        .collect();
+    .iter()
+    .copied()
+    .collect();
     if public_key_bytes.len() != 32 {
         return Err(TransportError::Handshake(
             "client public key must be 32 bytes".into(),
@@ -507,8 +506,9 @@ fn parse_session_hello(
     let nonce: Vec<u8> = hello
         .client_nonce()
         .ok_or_else(|| TransportError::Handshake("missing client nonce".into()))?
-        .iter()
-        .collect();
+    .iter()
+    .copied()
+    .collect();
     Ok(SessionHelloData {
         capabilities,
         client_public_key: public_key_bytes.as_slice().try_into().unwrap(),
@@ -538,13 +538,14 @@ fn parse_session_ack(
     }
     let capability_mask = ack
         .capability_mask()
-        .map(|vec| vec.iter().collect())
+        .map(|vec| vec.iter().copied().collect::<Vec<u32>>())
         .unwrap_or_default();
     let public_key_bytes: Vec<u8> = ack
         .server_public_key()
         .ok_or_else(|| TransportError::Handshake("missing server public key".into()))?
-        .iter()
-        .collect();
+    .iter()
+    .copied()
+    .collect();
     if public_key_bytes.len() != 32 {
         return Err(TransportError::Handshake(
             "server public key must be 32 bytes".into(),
@@ -553,8 +554,9 @@ fn parse_session_ack(
     let server_nonce: Vec<u8> = ack
         .server_nonce()
         .ok_or_else(|| TransportError::Handshake("missing server nonce".into()))?
-        .iter()
-        .collect();
+    .iter()
+    .copied()
+    .collect();
 
     Ok(SessionAckData {
         session_id: ack.session_id(),

@@ -1,5 +1,5 @@
 use crate::vr::{SimulatedInputProvider, VrError, VrInputProvider, VrInputSample};
-use openxr::{ApplicationInfo, Entry, FormFactor, Instance, Version};
+use openxr::{ApplicationInfo, Entry, ExtensionSet, FormFactor, Instance};
 
 pub struct OpenXrInputProvider {
     instance: Instance,
@@ -14,13 +14,15 @@ impl OpenXrInputProvider {
             .map_err(|err| VrError::new(format!("failed to load OpenXR loader: {err}")))?;
         let app_info = ApplicationInfo {
             application_name: "Theta Engine",
-            application_version: Version::new(0, 1, 0),
+            application_version: 1,
             engine_name: "Theta Engine",
-            engine_version: Version::new(0, 1, 0),
+            engine_version: 1,
         };
 
+        let enabled_extensions = ExtensionSet::default();
+
         let instance = entry
-            .create_instance(&app_info, &[], &[])
+            .create_instance(&app_info, &enabled_extensions, &[])
             .map_err(|err| VrError::new(format!("failed to create OpenXR instance: {err}")))?;
 
         let system_id = instance

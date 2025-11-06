@@ -26,6 +26,7 @@ pub mod transport {
 #[cfg(has_generated_network_schema)]
 #[allow(dead_code)]
 pub mod wire {
+    #![allow(clippy::all, unused_imports)]
     include!(concat!(
         env!("OUT_DIR"),
         "/flatbuffers/network_generated.rs"
