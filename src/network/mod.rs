@@ -26,6 +26,8 @@ pub mod transport {
 #[cfg(has_generated_network_schema)]
 #[allow(dead_code, unused_imports)]
 #[allow(clippy::all)]
+#[allow(unknown_lints)]
+#[allow(mismatched_lifetime_syntaxes)]
 pub mod wire {
     include!(concat!(
         env!("OUT_DIR"),

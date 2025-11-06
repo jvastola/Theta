@@ -391,11 +391,11 @@ impl ReplayTracker {
             return Some(value);
         }
         #[cfg(feature = "command-log-persistence")]
-        if let Some(persistence) = self.persistence.as_ref() {
-            if let Some(stored) = persistence.load(author) {
-                self.high_water.insert(author.clone(), stored);
-                return Some(stored);
-            }
+        if let Some(persistence) = self.persistence.as_ref()
+            && let Some(stored) = persistence.load(author)
+        {
+            self.high_water.insert(author.clone(), stored);
+            return Some(stored);
         }
         None
     }

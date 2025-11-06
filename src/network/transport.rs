@@ -764,23 +764,23 @@ impl HeartbeatActor {
                 };
                 match net::root_as_message_envelope(&bytes) {
                     Ok(envelope) => {
-                        if matches!(envelope.body_type(), MessageBody::Heartbeat) {
-                            if let Some(hb) = envelope.body_as_heartbeat() {
-                                let now_ms = current_time_millis();
-                                let remote_ts = hb.timestamp_ms();
-                                let diff = if now_ms >= remote_ts {
-                                    (now_ms - remote_ts) as f32
-                                } else {
-                                    0.0
-                                };
-                                recv_handle_metrics.update(|m| {
-                                    let prev = m.rtt_ms;
-                                    m.rtt_ms = diff;
-                                    m.jitter_ms = (diff - prev).abs();
-                                    m.packets_received = m.packets_received.saturating_add(1);
-                                    m.compression_ratio = 1.0;
-                                });
-                            }
+                        if matches!(envelope.body_type(), MessageBody::Heartbeat)
+                            && let Some(hb) = envelope.body_as_heartbeat()
+                        {
+                            let now_ms = current_time_millis();
+                            let remote_ts = hb.timestamp_ms();
+                            let diff = if now_ms >= remote_ts {
+                                (now_ms - remote_ts) as f32
+                            } else {
+                                0.0
+                            };
+                            recv_handle_metrics.update(|m| {
+                                let prev = m.rtt_ms;
+                                m.rtt_ms = diff;
+                                m.jitter_ms = (diff - prev).abs();
+                                m.packets_received = m.packets_received.saturating_add(1);
+                                m.compression_ratio = 1.0;
+                            });
                         }
                     }
                     Err(err) => {
@@ -915,8 +915,8 @@ mod tests {
         let client_signing_key = SigningKey::generate(&mut OsRng);
 
         let server_task = tokio::spawn(async move {
-            if let Some(connecting) = server_endpoint.accept().await {
-                if let Ok(session) = accept(
+            if let Some(connecting) = server_endpoint.accept().await
+                && let Ok(session) = accept(
                     connecting,
                     ServerHandshake {
                         protocol_version: 1,
@@ -927,10 +927,9 @@ mod tests {
                     },
                 )
                 .await
-                {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    session.close().await;
-                }
+            {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                session.close().await;
             }
         });
 
@@ -1101,8 +1100,8 @@ mod tests {
         let client_signing_key = SigningKey::generate(&mut OsRng);
 
         let _server_task = tokio::spawn(async move {
-            if let Some(connecting) = server_endpoint.accept().await {
-                if let Ok(session) = accept(
+            if let Some(connecting) = server_endpoint.accept().await
+                && let Ok(session) = accept(
                     connecting,
                     ServerHandshake {
                         protocol_version: 1,
@@ -1113,10 +1112,9 @@ mod tests {
                     },
                 )
                 .await
-                {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    session.close().await;
-                }
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                session.close().await;
             }
         });
 
@@ -1164,8 +1162,8 @@ mod tests {
         let client_public_key = client_signing_key.verifying_key().to_bytes();
 
         let _server_task = tokio::spawn(async move {
-            if let Some(connecting) = server_endpoint.accept().await {
-                if let Ok(session) = accept(
+            if let Some(connecting) = server_endpoint.accept().await
+                && let Ok(session) = accept(
                     connecting,
                     ServerHandshake {
                         protocol_version: 1,
@@ -1176,12 +1174,11 @@ mod tests {
                     },
                 )
                 .await
-                {
-                    let handshake = session.handshake();
-                    assert_eq!(handshake.client_public_key, client_public_key);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    session.close().await;
-                }
+            {
+                let handshake = session.handshake();
+                assert_eq!(handshake.client_public_key, client_public_key);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                session.close().await;
             }
         });
 
@@ -1229,17 +1226,17 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let mut sessions = Vec::new();
             for _ in 0..2 {
-                if let Some(connecting) = server_endpoint.accept().await {
-                    let server_handshake = ServerHandshake {
-                        protocol_version: 1,
-                        schema_hash: 0xABCDu64,
-                        capabilities: vec![1, 2, 3],
-                        signing_key: SigningKey::generate(&mut OsRng),
-                        heartbeat: server_heartbeat_cfg.clone(),
-                    };
-                    if let Ok(session) = accept(connecting, server_handshake).await {
-                        sessions.push(session);
-                    }
+                let server_handshake = ServerHandshake {
+                    protocol_version: 1,
+                    schema_hash: 0xABCDu64,
+                    capabilities: vec![1, 2, 3],
+                    signing_key: SigningKey::generate(&mut OsRng),
+                    heartbeat: server_heartbeat_cfg.clone(),
+                };
+                if let Some(connecting) = server_endpoint.accept().await
+                    && let Ok(session) = accept(connecting, server_handshake).await
+                {
+                    sessions.push(session);
                 }
             }
             tokio::time::sleep(Duration::from_millis(350)).await;
@@ -1332,8 +1329,8 @@ mod tests {
         let payload_pattern = 0xACu8;
 
         let server_task = tokio::spawn(async move {
-            if let Some(connecting) = server_endpoint.accept().await {
-                if let Ok(session) = accept(
+            if let Some(connecting) = server_endpoint.accept().await
+                && let Ok(session) = accept(
                     connecting,
                     ServerHandshake {
                         protocol_version: 1,
@@ -1344,16 +1341,15 @@ mod tests {
                     },
                 )
                 .await
-                {
-                    let received = session
-                        .assets
-                        .read_to_end(PAYLOAD_SIZE + 1024)
-                        .await
-                        .expect("read payload");
-                    assert_eq!(received.len(), PAYLOAD_SIZE);
-                    assert!(received.into_iter().all(|b| b == payload_pattern));
-                    session.close().await;
-                }
+            {
+                let received = session
+                    .assets
+                    .read_to_end(PAYLOAD_SIZE + 1024)
+                    .await
+                    .expect("read payload");
+                assert_eq!(received.len(), PAYLOAD_SIZE);
+                assert!(received.into_iter().all(|b| b == payload_pattern));
+                session.close().await;
             }
         });
 
@@ -1419,8 +1415,8 @@ mod tests {
         let server_signing_key = SigningKey::generate(&mut OsRng);
 
         let server_task = tokio::spawn(async move {
-            if let Some(connecting) = server_endpoint.accept().await {
-                if let Ok(session) = accept(
+            if let Some(connecting) = server_endpoint.accept().await
+                && let Ok(session) = accept(
                     connecting,
                     ServerHandshake {
                         protocol_version: 1,
@@ -1431,22 +1427,21 @@ mod tests {
                     },
                 )
                 .await
-                {
-                    let packet = session
-                        .receive_command_packet(Duration::from_secs(1))
-                        .await
-                        .expect("receive command packet")
-                        .expect("command packet present");
+            {
+                let packet = session
+                    .receive_command_packet(Duration::from_secs(1))
+                    .await
+                    .expect("receive command packet")
+                    .expect("command packet present");
 
-                    assert_eq!(packet.sequence, 42);
-                    let batch = packet.decode().expect("decode command batch");
-                    assert_eq!(batch.entries.len(), 1);
-                    let entry = &batch.entries[0];
-                    assert_eq!(entry.payload.command_type, "test.command");
-                    assert_eq!(entry.strategy, ConflictStrategy::LastWriteWins);
+                assert_eq!(packet.sequence, 42);
+                let batch = packet.decode().expect("decode command batch");
+                assert_eq!(batch.entries.len(), 1);
+                let entry = &batch.entries[0];
+                assert_eq!(entry.payload.command_type, "test.command");
+                assert_eq!(entry.strategy, ConflictStrategy::LastWriteWins);
 
-                    session.close().await;
-                }
+                session.close().await;
             }
         });
 
@@ -1552,8 +1547,8 @@ mod tests {
         let server_addr = server_endpoint.local_addr().expect("server addr");
 
         let server_task = tokio::spawn(async move {
-            if let Some(connecting) = server_endpoint.accept().await {
-                if let Ok(session) = accept(
+            if let Some(connecting) = server_endpoint.accept().await
+                && let Ok(session) = accept(
                     connecting,
                     ServerHandshake {
                         protocol_version: 1,
@@ -1564,10 +1559,9 @@ mod tests {
                     },
                 )
                 .await
-                {
-                    tokio::time::sleep(Duration::from_millis(120)).await;
-                    drop(session);
-                }
+            {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                drop(session);
             }
         });
 

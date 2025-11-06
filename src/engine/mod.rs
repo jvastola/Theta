@@ -333,12 +333,11 @@ impl Engine {
 
                     if let Some(primary) = selection.primary {
                         let handle = EntityHandle::from(primary);
-                        if let Ok(mut pipeline) = pipeline_handle.lock() {
-                            if let Err(err) = pipeline
+                        if let Ok(mut pipeline) = pipeline_handle.lock()
+                            && let Err(err) = pipeline
                                 .record_selection_highlight(handle, selection.highlight_active)
-                            {
-                                eprintln!("[commands] failed to record highlight command: {err}");
-                            }
+                        {
+                            eprintln!("[commands] failed to record highlight command: {err}");
                         }
                     }
                 }
@@ -346,15 +345,14 @@ impl Engine {
         });
 
         self.add_parallel_system_fn(Stage::Editor, "editor_debug_view", move |world, _| {
-            if let Some(selection) = world.get::<EditorSelection>(editor_entity) {
-                if let Some(entity) = selection.primary {
-                    if let Some(transform) = world.get::<Transform>(entity) {
-                        println!(
-                            "[editor] selection {:?} transform {:?} highlight {}",
-                            entity, transform.position, selection.highlight_active
-                        );
-                    }
-                }
+            if let Some(selection) = world.get::<EditorSelection>(editor_entity)
+                && let Some(entity) = selection.primary
+                && let Some(transform) = world.get::<Transform>(entity)
+            {
+                println!(
+                    "[editor] selection {:?} transform {:?} highlight {}",
+                    entity, transform.position, selection.highlight_active
+                );
             }
         });
     }
@@ -601,51 +599,50 @@ impl Engine {
         #[cfg(feature = "network-quic")]
         self.poll_remote_commands();
 
-        if let Some(stats_entity) = self.frame_stats_entity {
-            if let Some(stats) = self
+        if let Some(stats_entity) = self.frame_stats_entity
+            && let Some(stats) = self
                 .scheduler
                 .world_mut()
                 .get_mut::<FrameStats>(stats_entity)
-            {
-                let prev_samples = stats.profiling_samples;
-                let new_samples = prev_samples.saturating_add(1);
-                for stage in Stage::ordered() {
-                    let index = stage.index();
-                    if let Some(stage_profile) = profile.stage(stage) {
-                        stats.stage_durations_ms[index] = stage_profile.total_ms();
-                        stats.stage_sequential_ms[index] = stage_profile.sequential_ms();
-                        stats.stage_parallel_ms[index] = stage_profile.parallel_ms();
-                        stats.stage_read_only_violation[index] = stage_profile.read_only_violation;
+        {
+            let prev_samples = stats.profiling_samples;
+            let new_samples = prev_samples.saturating_add(1);
+            for stage in Stage::ordered() {
+                let index = stage.index();
+                if let Some(stage_profile) = profile.stage(stage) {
+                    stats.stage_durations_ms[index] = stage_profile.total_ms();
+                    stats.stage_sequential_ms[index] = stage_profile.sequential_ms();
+                    stats.stage_parallel_ms[index] = stage_profile.parallel_ms();
+                    stats.stage_read_only_violation[index] = stage_profile.read_only_violation;
 
-                        let prev_average = stats.stage_rolling_ms[index];
-                        stats.stage_rolling_ms[index] = if prev_samples == 0 {
-                            stage_profile.total_ms()
-                        } else {
-                            let delta = stage_profile.total_ms() - prev_average;
-                            prev_average + delta / (new_samples as f32)
-                        };
+                    let prev_average = stats.stage_rolling_ms[index];
+                    stats.stage_rolling_ms[index] = if prev_samples == 0 {
+                        stage_profile.total_ms()
+                    } else {
+                        let delta = stage_profile.total_ms() - prev_average;
+                        prev_average + delta / (new_samples as f32)
+                    };
 
-                        if stage_profile.read_only_violation {
-                            stats.stage_violation_count[index] =
-                                stats.stage_violation_count[index].saturating_add(1);
-                        }
+                    if stage_profile.read_only_violation {
+                        stats.stage_violation_count[index] =
+                            stats.stage_violation_count[index].saturating_add(1);
                     }
                 }
-
-                stats.profiling_samples = new_samples;
-
-                telemetry_sample = Some(FrameTelemetry::from_stage_arrays(
-                    stats.frames,
-                    stats.average_frame_time,
-                    &stats.stage_durations_ms,
-                    &stats.stage_sequential_ms,
-                    &stats.stage_parallel_ms,
-                    &stats.stage_rolling_ms,
-                    &stats.stage_read_only_violation,
-                    &stats.stage_violation_count,
-                    stats.controller_trigger,
-                ));
             }
+
+            stats.profiling_samples = new_samples;
+
+            telemetry_sample = Some(FrameTelemetry::from_stage_arrays(
+                stats.frames,
+                stats.average_frame_time,
+                &stats.stage_durations_ms,
+                &stats.stage_sequential_ms,
+                &stats.stage_parallel_ms,
+                &stats.stage_rolling_ms,
+                &stats.stage_read_only_violation,
+                &stats.stage_violation_count,
+                stats.controller_trigger,
+            ));
         }
 
         if let Ok(mut pipeline) = self.command_pipeline.lock() {
@@ -685,10 +682,8 @@ impl Engine {
                             }
                         }
 
-                        if let Some(mut drained) = outbox_packets {
-                            if !drained.is_empty() {
-                                packets_to_queue.append(&mut drained);
-                            }
+                        if let Some(mut drained) = outbox_packets && !drained.is_empty() {
+                            packets_to_queue.append(&mut drained);
                         }
                     }
 
@@ -769,15 +764,14 @@ impl Engine {
                 }
             }
 
-            if let Some(entity) = self.command_entity {
-                if let Some(depth) = self
+            if let Some(entity) = self.command_entity
+                && let Some(depth) = self
                     .scheduler
                     .world()
                     .get::<CommandTransportQueue>(entity)
                     .map(|queue| queue.pending_depth())
-                {
-                    pipeline.update_queue_depth(depth);
-                }
+            {
+                pipeline.update_queue_depth(depth);
             }
 
             command_metrics_snapshot = Some(pipeline.metrics_snapshot());
@@ -791,10 +785,10 @@ impl Engine {
             let world = self.scheduler.world_mut();
             let mut latest_to_publish = None;
 
-            if let Some(surface) = world.get_mut::<TelemetrySurface>(entity) {
-                if surface.record(sample) {
-                    latest_to_publish = surface.latest().cloned();
-                }
+            if let Some(surface) = world.get_mut::<TelemetrySurface>(entity)
+                && surface.record(sample)
+            {
+                latest_to_publish = surface.latest().cloned();
             }
 
             if let Some(mut latest) = latest_to_publish {
