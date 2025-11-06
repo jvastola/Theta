@@ -1,5 +1,6 @@
-use super::{TransportDiagnostics, TransportKind, current_time_millis};
+use super::{current_time_millis, TransportDiagnostics, TransportKind};
 use crate::network::command_log::{CommandPacket, MAX_COMMAND_PACKET_BYTES};
+use crate::network::voice::{VoiceDiagnosticsHandle, VoicePacket};
 use crate::network::wire;
 use bytes::Bytes;
 use ed25519_dalek::SigningKey;
@@ -52,6 +53,9 @@ const FRAME_HEADER_LEN: usize = 4;
 const HANDSHAKE_CAPACITY: usize = 1024;
 const FRAME_KIND_COMMAND_PACKET: u8 = 1;
 const FRAME_KIND_COMPONENT_DELTA: u8 = 2;
+const VOICE_FRAME_HEADER_BYTES: usize = 8 + 8 + 4;
+const LOCAL_SPEAKER_TAG: &str = "local";
+const REMOTE_SPEAKER_TAG: &str = "remote";
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -512,19 +516,27 @@ impl TransportSession {
 
 pub struct WebRtcTransport {
     peer: Arc<RTCPeerConnection>,
-    channel: Arc<RTCDataChannel>,
-    inbox: Arc<TokioMutex<UnboundedReceiver<Vec<u8>>>>,
-    _inbox_sender: Arc<UnboundedSender<Vec<u8>>>,
+    command_channel: Arc<RTCDataChannel>,
+    command_inbox: Arc<TokioMutex<UnboundedReceiver<Vec<u8>>>>,
+    _command_inbox_sender: Arc<UnboundedSender<Vec<u8>>>,
+    voice_channel: Option<Arc<RTCDataChannel>>,
+    voice_inbox: Option<Arc<TokioMutex<UnboundedReceiver<Vec<u8>>>>>,
+    _voice_inbox_sender: Option<Arc<UnboundedSender<Vec<u8>>>>,
     metrics: TransportMetricsHandle,
+    voice_metrics: VoiceDiagnosticsHandle,
+    voice_last_latency_ms: Arc<Mutex<Option<f32>>>,
 }
 
 impl WebRtcTransport {
-    pub fn from_parts(peer: Arc<RTCPeerConnection>, channel: Arc<RTCDataChannel>) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        let sender = Arc::new(tx);
-        let inbox_sender = Arc::clone(&sender);
-        let msg_sender = Arc::clone(&sender);
-        let inbox = Arc::new(TokioMutex::new(rx));
+    pub fn from_parts(
+        peer: Arc<RTCPeerConnection>,
+        command_channel: Arc<RTCDataChannel>,
+        voice_channel: Option<Arc<RTCDataChannel>>,
+    ) -> Self {
+        let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let command_sender = Arc::new(command_tx);
+        let command_inbox = Arc::new(TokioMutex::new(command_rx));
+        let command_msg_sender = Arc::clone(&command_sender);
 
         let metrics = TransportMetricsHandle::new();
         metrics.update(|m| {
@@ -534,9 +546,12 @@ impl WebRtcTransport {
             }
         });
 
+        let voice_metrics = VoiceDiagnosticsHandle::new();
+        let voice_last_latency_ms = Arc::new(Mutex::new(None));
+
         let metrics_for_open = metrics.clone();
-        let channel_for_open = Arc::clone(&channel);
-        channel_for_open.on_open(Box::new(move || {
+        let command_channel_for_open = Arc::clone(&command_channel);
+        command_channel_for_open.on_open(Box::new(move || {
             let metrics = metrics_for_open.clone();
             Box::pin(async move {
                 metrics.update(|m| m.kind = TransportKind::WebRtc);
@@ -544,8 +559,8 @@ impl WebRtcTransport {
         }));
 
         let metrics_for_close = metrics.clone();
-        let channel_for_close = Arc::clone(&channel);
-        channel_for_close.on_close(Box::new(move || {
+        let command_channel_for_close = Arc::clone(&command_channel);
+        command_channel_for_close.on_close(Box::new(move || {
             let metrics = metrics_for_close.clone();
             Box::pin(async move {
                 metrics.update(|m| m.kind = TransportKind::WebRtc);
@@ -568,27 +583,80 @@ impl WebRtcTransport {
             })
         }));
 
-        let channel_for_messages = Arc::clone(&channel);
-        channel_for_messages.on_message(Box::new(move |msg: DataChannelMessage| {
-            let sender = msg_sender.clone();
+        let command_channel_for_messages = Arc::clone(&command_channel);
+        command_channel_for_messages.on_message(Box::new(move |msg: DataChannelMessage| {
+            let sender = command_msg_sender.clone();
             Box::pin(async move {
                 let payload = msg.data.to_vec();
                 let _ = sender.send(payload);
             })
         }));
 
+        let (voice_inbox, voice_sender_arc) = if let Some(channel) = voice_channel.as_ref() {
+            let (voice_tx, voice_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            let inbox = Arc::new(TokioMutex::new(voice_rx));
+            let sender = Arc::new(voice_tx);
+
+            let metrics_for_open = voice_metrics.clone();
+            let voice_channel_for_open = Arc::clone(channel);
+            voice_channel_for_open.on_open(Box::new(move || {
+                let metrics = metrics_for_open.clone();
+                Box::pin(async move {
+                    metrics.update(|m| {
+                        if !m.active_speakers.contains(&"local".to_string()) {
+                            m.active_speakers.push("local".to_string());
+                        }
+                    });
+                })
+            }));
+
+            let metrics_for_close = voice_metrics.clone();
+            let voice_channel_for_close = Arc::clone(channel);
+            voice_channel_for_close.on_close(Box::new(move || {
+                let metrics = metrics_for_close.clone();
+                Box::pin(async move {
+                    metrics.update(|m| {
+                        m.active_speakers.retain(|speaker| speaker != "local");
+                    });
+                })
+            }));
+
+            let message_sender = Arc::clone(&sender);
+            channel.on_message(Box::new(move |msg: DataChannelMessage| {
+                let sender = message_sender.clone();
+                Box::pin(async move {
+                    let _ = sender.send(msg.data.to_vec());
+                })
+            }));
+
+            (Some(inbox), Some(sender))
+        } else {
+            (None, None)
+        };
+
         Self {
             peer,
-            channel,
-            inbox,
-            _inbox_sender: inbox_sender,
+            command_channel,
+            command_inbox,
+            _command_inbox_sender: command_sender,
+            voice_channel,
+            voice_inbox,
+            _voice_inbox_sender: voice_sender_arc,
             metrics,
+            voice_metrics,
+            voice_last_latency_ms,
         }
     }
 
     pub fn metrics_handle(&self) -> TransportMetricsHandle {
         self.metrics.update(|m| m.kind = TransportKind::WebRtc);
         self.metrics.clone()
+    }
+
+    pub fn voice_metrics_handle(&self) -> Option<VoiceDiagnosticsHandle> {
+        self.voice_channel
+            .as_ref()
+            .map(|_| self.voice_metrics.clone())
     }
 
     pub fn kind(&self) -> TransportKind {
@@ -611,7 +679,7 @@ impl WebRtcTransport {
             let frame_len = frame.len();
             total_bytes = total_bytes.saturating_add(frame_len);
             let payload = Bytes::from(frame);
-            self.channel
+            self.command_channel
                 .send(&payload)
                 .await
                 .map_err(|err| TransportError::WebRtc(err.to_string()))?;
@@ -646,7 +714,7 @@ impl WebRtcTransport {
     ) -> Result<Option<CommandPacket>, TransportError> {
         loop {
             let frame = {
-                let mut guard = self.inbox.lock().await;
+                let mut guard = self.command_inbox.lock().await;
                 match tokio::time::timeout(timeout, guard.recv()).await {
                     Ok(Some(frame)) => frame,
                     Ok(None) => return Ok(None),
@@ -700,9 +768,134 @@ impl WebRtcTransport {
         }
     }
 
+    pub async fn send_voice_packet(&self, packet: &VoicePacket) -> Result<(), TransportError> {
+        let channel = self
+            .voice_channel
+            .as_ref()
+            .ok_or(TransportError::Unsupported("voice channel not negotiated"))?;
+
+        let encoded = Self::encode_voice_packet(packet);
+        let payload_len = encoded.len() as u64;
+        let payload = Bytes::from(encoded);
+
+        channel
+            .send(&payload)
+            .await
+            .map_err(|err| TransportError::WebRtc(err.to_string()))?;
+
+        self.voice_metrics.update(|m| {
+            m.packets_sent = m.packets_sent.saturating_add(1);
+            m.bytes_sent = m.bytes_sent.saturating_add(payload_len);
+            m.voiced_frames = m.voiced_frames.saturating_add(1);
+            let bits = m.bytes_sent as f32 * 8.0;
+            m.bitrate_kbps = bits / 1000.0;
+            if !m.active_speakers.iter().any(|speaker| speaker == LOCAL_SPEAKER_TAG) {
+                m.active_speakers.push(LOCAL_SPEAKER_TAG.to_string());
+            }
+        });
+
+        Ok(())
+    }
+
+    pub async fn receive_voice_packet(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<VoicePacket>, TransportError> {
+        let inbox = match &self.voice_inbox {
+            Some(inbox) => inbox,
+            None => return Ok(None),
+        };
+
+        let frame = {
+            let mut guard = inbox.lock().await;
+            match tokio::time::timeout(timeout, guard.recv()).await {
+                Ok(Some(frame)) => frame,
+                Ok(None) => return Ok(None),
+                Err(_) => return Ok(None),
+            }
+        };
+
+        let packet = Self::decode_voice_packet(&frame)?;
+        let now = current_time_millis();
+        let latency_ms = (now.saturating_sub(packet.timestamp_ms)) as f32;
+
+        let jitter_delta = if let Ok(mut guard) = self.voice_last_latency_ms.lock() {
+            let previous = *guard;
+            *guard = Some(latency_ms);
+            previous.map(|prev| (latency_ms - prev).abs())
+        } else {
+            None
+        };
+
+        self.voice_metrics.update(|m| {
+            m.packets_received = m.packets_received.saturating_add(1);
+            m.bytes_received = m.bytes_received.saturating_add(frame.len() as u64);
+            m.latency_ms = latency_ms;
+            if let Some(delta) = jitter_delta {
+                m.jitter_ms = (m.jitter_ms * 0.8) + (delta * 0.2);
+            }
+            if !m
+                .active_speakers
+                .iter()
+                .any(|speaker| speaker == REMOTE_SPEAKER_TAG)
+            {
+                m.active_speakers.push(REMOTE_SPEAKER_TAG.to_string());
+            }
+        });
+
+        Ok(Some(packet))
+    }
+
+    fn encode_voice_packet(packet: &VoicePacket) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(VOICE_FRAME_HEADER_BYTES + packet.payload.len());
+        bytes.extend_from_slice(&packet.sequence.to_le_bytes());
+        bytes.extend_from_slice(&packet.timestamp_ms.to_le_bytes());
+        bytes.extend_from_slice(&(packet.payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&packet.payload);
+        bytes
+    }
+
+    fn decode_voice_packet(bytes: &[u8]) -> Result<VoicePacket, TransportError> {
+        if bytes.len() < VOICE_FRAME_HEADER_BYTES {
+            return Err(TransportError::Protocol(
+                "voice packet shorter than header".into(),
+            ));
+        }
+
+        let sequence = u64::from_le_bytes(
+            bytes[0..8]
+                .try_into()
+                .map_err(|_| TransportError::Protocol("invalid voice sequence bytes".into()))?,
+        );
+        let timestamp_ms = u64::from_le_bytes(
+            bytes[8..16]
+                .try_into()
+                .map_err(|_| TransportError::Protocol("invalid voice timestamp bytes".into()))?,
+        );
+        let payload_len = u32::from_le_bytes(
+            bytes[16..20]
+                .try_into()
+                .map_err(|_| TransportError::Protocol("invalid voice payload length".into()))?,
+        ) as usize;
+
+        if bytes.len() < VOICE_FRAME_HEADER_BYTES + payload_len {
+            return Err(TransportError::Protocol(
+                "voice packet truncated payload".into(),
+            ));
+        }
+
+        let payload = bytes[VOICE_FRAME_HEADER_BYTES..VOICE_FRAME_HEADER_BYTES + payload_len].to_vec();
+        Ok(VoicePacket::new(sequence, timestamp_ms, payload))
+    }
+
     pub async fn close(self) {
-        if let Err(err) = self.channel.close().await {
+        if let Err(err) = self.command_channel.close().await {
             log::warn!("[transport] failed to close WebRTC data channel: {err}");
+        }
+        if let Some(channel) = &self.voice_channel {
+            if let Err(err) = channel.close().await {
+                log::warn!("[transport] failed to close WebRTC voice channel: {err}");
+            }
         }
         if let Err(err) = self.peer.close().await {
             log::warn!("[transport] failed to close WebRTC peer connection: {err}");
@@ -745,7 +938,7 @@ async fn create_loopback_webrtc_pair() -> Result<(WebRtcTransport, WebRtcTranspo
             .map_err(|err| TransportError::WebRtc(err.to_string()))?,
     );
 
-    let data_channel = offer_pc
+    let command_channel = offer_pc
         .create_data_channel(
             "theta-command",
             Some(RTCDataChannelInit {
@@ -755,14 +948,47 @@ async fn create_loopback_webrtc_pair() -> Result<(WebRtcTransport, WebRtcTranspo
         )
         .await
         .map_err(|err| TransportError::WebRtc(err.to_string()))?;
+    let voice_channel = offer_pc
+        .create_data_channel(
+            "theta-voice",
+            Some(RTCDataChannelInit {
+                ordered: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|err| TransportError::WebRtc(err.to_string()))?;
 
-    let (remote_dc_tx, remote_dc_rx) = oneshot::channel::<Arc<RTCDataChannel>>();
-    let remote_dc_sender = Arc::new(TokioMutex::new(Some(remote_dc_tx)));
+    struct RemoteChannelWaiters {
+        command: Option<oneshot::Sender<Arc<RTCDataChannel>>>,
+        voice: Option<oneshot::Sender<Arc<RTCDataChannel>>>,
+    }
+
+    let (remote_command_tx, remote_command_rx) = oneshot::channel::<Arc<RTCDataChannel>>();
+    let (remote_voice_tx, remote_voice_rx) = oneshot::channel::<Arc<RTCDataChannel>>();
+    let remote_waiters = Arc::new(TokioMutex::new(RemoteChannelWaiters {
+        command: Some(remote_command_tx),
+        voice: Some(remote_voice_tx),
+    }));
     answer_pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
-        let sender = remote_dc_sender.clone();
+        let waiters = remote_waiters.clone();
         Box::pin(async move {
-            if let Some(tx) = sender.lock().await.take() {
-                let _ = tx.send(dc);
+            let label = dc.label();
+            let mut waiters = waiters.lock().await;
+            match label.as_str() {
+                "theta-command" => {
+                    if let Some(tx) = waiters.command.take() {
+                        let _ = tx.send(dc);
+                    }
+                }
+                "theta-voice" => {
+                    if let Some(tx) = waiters.voice.take() {
+                        let _ = tx.send(dc);
+                    }
+                }
+                other => {
+                    log::warn!("[webrtc] received unexpected data channel: {other}");
+                }
             }
         })
     }));
@@ -806,15 +1032,25 @@ async fn create_loopback_webrtc_pair() -> Result<(WebRtcTransport, WebRtcTranspo
         .await
         .map_err(|err| TransportError::WebRtc(err.to_string()))?;
 
-    let remote_channel = remote_dc_rx
+    let remote_command_channel = remote_command_rx
         .await
-        .map_err(|_| TransportError::WebRtc("data channel handshake failed".into()))?;
+        .map_err(|_| TransportError::WebRtc("command channel handshake failed".into()))?;
+    let remote_voice_channel = remote_voice_rx
+        .await
+        .map_err(|_| TransportError::WebRtc("voice channel handshake failed".into()))?;
 
-    wait_for_channel_open(&data_channel).await;
-    wait_for_channel_open(&remote_channel).await;
+    wait_for_channel_open(&command_channel).await;
+    wait_for_channel_open(&remote_command_channel).await;
+    wait_for_channel_open(&voice_channel).await;
+    wait_for_channel_open(&remote_voice_channel).await;
 
-    let offer_transport = WebRtcTransport::from_parts(Arc::clone(&offer_pc), data_channel);
-    let answer_transport = WebRtcTransport::from_parts(answer_pc, remote_channel);
+    let offer_transport = WebRtcTransport::from_parts(
+        Arc::clone(&offer_pc),
+        command_channel,
+        Some(voice_channel),
+    );
+    let answer_transport =
+        WebRtcTransport::from_parts(answer_pc, remote_command_channel, Some(remote_voice_channel));
 
     Ok((offer_transport, answer_transport))
 }
@@ -1540,11 +1776,11 @@ mod tests {
         let server_addr = server_endpoint.local_addr().expect("server addr");
 
         let server_task = tokio::spawn(async move {
-            if let Some(connecting) = server_endpoint.accept().await {
-                if let Ok(connection) = connecting.await {
-                    // Drop the connection without responding to force the client to time out.
-                    drop(connection);
-                }
+            if let Some(connecting) = server_endpoint.accept().await
+                && let Ok(connection) = connecting.await
+            {
+                // Drop the connection without responding to force the client to time out.
+                drop(connection);
             }
         });
 

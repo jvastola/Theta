@@ -1,6 +1,7 @@
 pub mod command_log;
 pub mod replication;
 pub mod schema;
+pub mod voice;
 
 #[cfg(feature = "network-quic")]
 pub mod transport;

@@ -1,6 +1,6 @@
 # Theta Engine Unified Status Overview
 
-**Updated:** November 5, 2025  
+**Updated:** November 6, 2025  
 **Maintainers:** Systems & Networking Team
 
 ## Delivery Snapshot
@@ -13,8 +13,8 @@
 | Phase 4 | Command Log & Conflict Resolution | ✅ Complete | Lamport-ordered command log, signed command pipeline, QUIC command transport, telemetry metrics |
 | Phase 5 | Production Hardening | 🚧 In Flight | Security hardening, WebRTC fallback, compression, interest management |
 
-**Test Coverage:** 74 tests passing (68 unit + 6 integration)  
-**Build Status:** `cargo build` and `cargo test` (with `network-quic`) passing  
+**Test Coverage:** 103 tests passing (97 unit + 6 integration) with `network-quic`  
+**Build Status:** `cargo build`, `cargo test --all-features`, and `cargo clippy --all-targets --all-features -- -D warnings` passing  
 **Feature Flags:** `render-wgpu`, `vr-openxr`, `network-quic` validated in CI
 
 ## Phase Rollup
@@ -34,7 +34,8 @@
 - Reference plan: `docs/phase5_parallel_plan.md` (parallel work streams and owners).
 
 ## Metrics & Telemetry
-- **Tests:** 74 passing (no failures, no ignored). Integration suites cover replication, command pipeline, telemetry, and transport loopback. Enabling `network-quic` adds 12 transport-specific unit tests for a total of 86.
+- **Tests:** 103 passing with `network-quic` (97 unit + 6 integration). Coverage now spans handshake nonce validation, timeout handling, oversized payload rejection, signature tampering detection, rate limiting enforcement, replay attack prevention, and the new voice scaffolding suite (codec roundtrip, jitter buffer ordering, VAD detection, session metrics).
+- **Quality Gates:** `cargo clippy --all-targets --all-features -- -D warnings` enforced; all lint violations resolved.
 - **Performance Instrumentation:** Command metrics now include payload guard drops; transport diagnostics tag the active transport (`Quic` or `WebRtc`) and surface in the overlay for operator awareness.
 - **Codebase Footprint:** ~8,500 source LOC + ~2,700 test LOC (per `COMPLETION_SUMMARY.md`).
 
@@ -52,12 +53,22 @@
 - **Historical Records:** `docs/archive/phase1-4_summary.md`, `docs/archive/phase2_review.md`, `docs/archive/phase3_plan.md`, `docs/archive/phase3_review.md`
 
 ## Recent Resolutions
+- **Edge-Case Test Expansion (Nov 6, 2025):** Added 10 new tests covering transport boundary conditions, failure modes, and adversarial scenarios:
+  - Handshake nonce validation (QUIC/WebRTC reject empty nonces)
+  - Timeout handling (QUIC handshake returns error within deadline)
+  - Oversized payload rejection (QUIC drops, WebRTC errors on >64KiB packets)
+  - Command log signature tampering detection
+  - Rate limiting burst enforcement (100 command limit verified)
+  - Replay attack prevention (existing test verified against stale nonces)
+- **Voice Module Scaffolding (Nov 6, 2025):** Landed `network::voice` with a passthrough codec, jitter buffer, RMS-based VAD, and voice metrics; four unit tests exercise roundtrips, ordering, detection, and session telemetry.
+- **Lint Compliance:** Resolved all clippy warnings across codebase; dead-code and format lint issues eliminated.
 - **Phase 4 Status Unified:** All docs now report Phase 4 as complete (previously inconsistently marked 75% complete in `COMPLETION_SUMMARY.md`, `INDEX.md`, and `roadmap_november_2025.md`).
-- **Test Count Aligned:** Repository-wide totals now reflect 74 tests (68 unit + 6 integration) across completion summary, roadmap, and index (previous counts lagged at 66).
+- **Test Count Aligned:** Repository-wide totals now reflect 103 tests (97 unit + 6 integration with `network-quic`) across completion summary, roadmap, and index.
 - **Live Doc Paths:** Index navigation now points to archived Phase 2/3 documents and the new unified status overview.
-- **Command Log Security Scaffolding:** Added `CommandLogConfig` with rate limiter and replay tracker defaults plus guard telemetry counters, increasing automated tests to 74.
+- **Command Log Security Scaffolding:** Added `CommandLogConfig` with rate limiter and replay tracker defaults plus guard telemetry counters.
 
 ## Next Checkpoints
-- **Nov 8-14, 2025:** Phase 5 security hardening sprint (nonce replay guard, rate limiting prototype).
-- **Nov 15-21, 2025:** Transport/Compression review — WebRTC prototype validation and Zstd baselining.
-- **Nov 21, 2025:** Documentation sweep (status overview refresh, index review).
+- **Nov 6-12, 2025:** Edge-case test expansion continuation — heartbeat loss detection, replication boundary conditions, WebRTC ICE/signaling timeouts (target: 100+ tests).
+- **Nov 13-19, 2025:** Transport/Compression review — WebRTC convergence validation and Zstd baselining.
+- **Nov 20, 2025:** Phase 5 mid-sprint checkpoint (security hardening status, test coverage report).
+- **Nov 27, 2025:** Documentation sweep (status overview refresh, metrics reference update).

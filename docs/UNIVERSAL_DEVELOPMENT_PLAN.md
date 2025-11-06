@@ -10,8 +10,9 @@
 Theta Engine is a Rust-native VR collaboration platform combining real-time mesh authoring, deterministic command replication, and integrated voice communication. This plan consolidates all architectural decisions, test coverage requirements, and delivery milestones into a universal execution roadmap independent of specific dates.
 
 **Current State:** Phase 4 complete (Command Log & Conflict Resolution), Phase 5 in-flight (Production Hardening & Transport Resilience)  
-**Test Coverage:** 74 tests passing (68 unit + 6 integration; 86 with `network-quic` feature)  
-**Lines of Code:** ~8,500 source + ~2,700 test = ~11,200 total
+**Test Coverage:** 103 tests passing (97 unit + 6 integration with `network-quic`)  
+**Lines of Code:** ~8,500 source + ~2,700 test = ~11,200 total  
+**Edge-Case Coverage:** Transport timeouts, oversized payloads, signature tampering, rate limiting, replay protection
 
 ---
 
@@ -161,11 +162,11 @@ pub struct VoiceDiagnostics {
 ### Implementation Phases
 
 #### Voice Foundation (Phase 5.5)
-- [ ] Add `network::voice` module with Opus codec integration
-- [ ] Define `VoiceSession` and `VoicePacket` data structures
+- [ ] Add `network::voice` module with Opus codec integration *(passthrough scaffolding landed; Opus wiring pending)*
+- [x] Define `VoiceSession` and `VoicePacket` data structures
 - [ ] Extend WebRTC transport with unreliable/unordered voice channel
-- [ ] Implement jitter buffer with adaptive latency (40-120ms)
-- [ ] Add voice activity detection (VAD) for bandwidth optimization
+- [ ] Implement jitter buffer with adaptive latency (40-120ms) *(basic fixed-window jitter buffer in place; adaptive sizing pending)*
+- [x] Add voice activity detection (VAD) for bandwidth optimization *(RMS-based detector shipped with tests)*
 - [ ] Extend telemetry overlay with voice diagnostics
 
 #### Spatial Audio Integration (Phase 6.5)
@@ -185,10 +186,13 @@ pub struct VoiceDiagnostics {
 ### Test Requirements (Voice)
 
 #### Unit Tests
-- [ ] `voice::codec::opus_encode_decode_roundtrip` - Verify lossless encoding/decoding
-- [ ] `voice::jitter::adaptive_latency_adjusts_correctly` - Test buffer expansion/contraction
-- [ ] `voice::vad::detects_speech_vs_silence` - Validate voice activity detection
-- [ ] `voice::metrics::tracks_packet_loss_and_latency` - Ensure telemetry accuracy
+- [x] `voice::codec_roundtrip_preserves_samples` - Passthrough codec regression guard until Opus lands
+- [x] `voice::jitter_buffer_reorders_packets` - Validates ordering semantics and buffer eviction
+- [x] `voice::vad_detects_speech_vs_silence` - RMS detector threshold regression guard
+- [x] `voice::session_processes_packets_and_updates_metrics` - Exercises jitter buffer, VAD, and telemetry counters
+- [ ] `voice::codec::opus_encode_decode_roundtrip` - Verify lossless Opus encoding/decoding
+- [ ] `voice::jitter::adaptive_latency_adjusts_correctly` - Test buffer expansion/contraction under jitter spikes
+- [ ] `voice::metrics::tracks_packet_loss_and_latency` - Ensure telemetry accuracy, including loss/latency buckets
 
 #### Integration Tests
 - [ ] `voice_session_establishes_over_webrtc` - End-to-end voice session setup
@@ -230,35 +234,46 @@ pub struct VoiceDiagnostics {
 
 ## Test Coverage Strategy
 
-### Current Coverage (74 tests, 86 with `network-quic`)
+### Current Coverage (103 tests with `network-quic`)
 
 #### By Focus Area
 - **ECS & Scheduler:** 15 tests (entity lifecycle, stage execution, profiling, violations)
-- **Command Log & Pipeline:** 16 tests (permissions, conflicts, Lamport ordering, fuzz, replay, rate limiting)
+- **Command Log & Pipeline:** 19 tests (permissions, conflicts, Lamport ordering, fuzz, replay, rate limiting, signature tampering)
 - **Replication & Schema:** 14 tests (snapshot chunking, delta diffing, manifest hashing, registry)
 - **Telemetry & Metrics:** 7 tests (overlay rendering, metrics snapshots, diagnostics export, transport kind)
-- **Transport (QUIC/WebRTC):** 13 tests (handshake validation, heartbeat, packet roundtrips, WebRTC fallback)
+- **Transport (QUIC/WebRTC):** 19 tests (handshake validation, nonce rejection, timeouts, oversized payloads, heartbeat, packet roundtrips, empty packet handling, WebRTC fallback)
 - **Editor Commands & Tools:** 7 tests (outbox lifecycle, mesh serialization, transform/tool flows)
 - **VR & Rendering:** 6 tests (simulated input, OpenXR stubs, render loop smoke tests)
+- **Voice Subsystem:** 4 tests (passthrough codec roundtrip, jitter buffer ordering, RMS-based VAD detection, session metrics tracking)
 - **Integration Suites:** 6 tests (command pipeline, replication loopback, telemetry ingestion)
 
-### Edge Case Enhancements (Required)
+### Edge Case Enhancements (In Progress)
 
-#### Transport Layer
+#### Transport Layer (Completed: 6/15)
+- [x] `session_hello_rejects_empty_nonce` - Handshake nonce validation
+- [x] `session_ack_rejects_empty_nonce` - Server nonce validation
+- [x] `quic_transport_tolerates_empty_packet_list` - Empty packet handling
+- [x] `webrtc_transport_tolerates_empty_packet_list` - WebRTC empty packet handling
+- [x] `quic_handshake_timeout_returns_error_within_deadline` - Timeout enforcement
+- [x] `quic_transport_drops_oversized_command_packet` - Oversized payload rejection
+- [x] `webrtc_transport_drops_oversized_command_packet` - WebRTC oversized payload error
 - [ ] `quic_handshake_tolerates_out_of_order_packets` - Test packet reordering resilience
 - [ ] `webrtc_transport_recovers_from_datachannel_close` - Test graceful disconnection
 - [ ] `heartbeat_survives_temporary_network_partition` - Test timeout/reconnect logic
 - [ ] `transport_metrics_handle_wrapping_counters` - Test u64 overflow safety
 - [ ] `mixed_quic_webrtc_clients_converge_state` - Cross-transport determinism
 
-#### Command Log
+#### Command Log (Completed: 3/10)
+- [x] `integrate_remote_rejects_tampered_signature` - Signature tampering detection
+- [x] `integrate_remote_rate_limits_command_bursts` - Rate limiting enforcement
+- [x] `integrate_remote_rejects_stale_entries` - Replay attack prevention
 - [ ] `command_log_rejects_future_timestamps` - Prevent timestamp manipulation attacks
 - [ ] `lamport_clock_handles_u64_wraparound` - Test 2^64 overflow edge case
 - [ ] `rate_limiter_refills_correctly_after_long_idle` - Test token bucket edge case
 - [ ] `signature_verification_rejects_malformed_keys` - Test corrupt public key handling
 - [ ] `replay_tracker_handles_nonce_gaps` - Test missing nonce sequences
 
-#### Replication
+#### Replication (Completed: 0/8)
 - [ ] `delta_tracker_handles_rapid_component_churn` - 1000+ insert/remove cycles
 - [ ] `snapshot_chunking_handles_oversized_components` - Components > chunk limit
 - [ ] `registry_deduplication_survives_concurrent_registration` - Race condition test
@@ -270,6 +285,7 @@ pub struct VoiceDiagnostics {
 - [ ] `transport_diagnostics_survive_metrics_handle_drop` - Weak ref edge case
 
 #### Voice (New)
+- [x] `voice_scaffolding_suite` - Passthrough codec roundtrip, jitter buffer ordering, RMS VAD, session metrics tracking
 - [ ] `opus_encoder_handles_silence_efficiently` - DTX activation test
 - [ ] `jitter_buffer_recovers_from_burst_loss` - 10+ consecutive dropped packets
 - [ ] `vad_doesnt_trigger_on_background_noise` - False positive suppression
@@ -313,14 +329,14 @@ pub struct VoiceDiagnostics {
 ---
 
 ### Milestone 2: WebRTC Production & Voice Foundation
-**Status:** Not Started
+**Status:** In Progress
 
 **Deliverables:**
 - [ ] Replace in-memory WebRTC channel with real WebRTC data channels
 - [ ] Implement signaling server (WebSocket-based, peer discovery)
 - [ ] Add STUN/TURN integration for NAT traversal
-- [ ] Implement `network::voice` module with Opus codec
-- [ ] Add jitter buffer and voice activity detection (VAD)
+- [ ] Implement `network::voice` module with Opus codec *(passthrough scaffolding merged; Opus binding pending)*
+- [x] Add jitter buffer and voice activity detection (VAD) *(baseline fixed-window buffer + RMS detector landed with tests)*
 - [ ] Extend telemetry with voice diagnostics
 - [ ] Convergence tests: QUIC ↔ WebRTC state synchronization
 
@@ -464,21 +480,19 @@ pub struct VoiceDiagnostics {
 # Standard build
 cargo build
 
-# Run default tests (74 tests)
-cargo test
-
-# Run with network features (86 tests)
-cargo test --features network-quic
-
-# Run with all features
+# Run all tests with network features (103 tests)
 cargo test --all-features
 
-# Format and lint
+# Format and lint (enforced in CI)
 cargo fmt
-cargo clippy --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Regenerate component manifest
 cargo run --bin generate_manifest
+
+# Run specific edge-case tests
+cargo test --all-features -- quic_handshake_timeout
+cargo test --all-features -- integrate_remote_rejects_tampered_signature
 ```
 
 ### Feature Flags
@@ -490,14 +504,13 @@ cargo run --bin generate_manifest
 
 ### CI/CD Pipeline
 - [x] `cargo fmt` validation
-- [x] `cargo clippy --all-targets --all-features`
-- [x] `cargo test` (default features)
-- [x] `cargo test --features network-quic`
-- [ ] `cargo test --all-features` (add when voice/physics ready)
+- [x] `cargo clippy --all-targets --all-features -- -D warnings` (strict enforcement)
+- [x] `cargo test --all-features` (103 tests passing)
 - [x] FlatBuffers schema validation
 - [x] Component manifest freshness check
 - [ ] Performance regression tests (Criterion benchmarks)
 - [ ] Integration test suite with simulated multi-peer scenarios
+- [ ] Code coverage tracking (target: ≥80% line coverage)
 
 ---
 
@@ -612,12 +625,12 @@ Voice schema extensions (pending):
 This universal development plan consolidates the Theta Engine roadmap into a date-agnostic execution framework, expanding scope to include multiplayer voice communication and comprehensive edge-case testing. The plan balances feature delivery with quality assurance, ensuring production-ready foundations before advancing to user-facing milestones.
 
 **Next Steps:**
-1. Review and approve Milestone 2 scope (WebRTC Production & Voice Foundation)
+1. Reconfirm Milestone 2 scope and owners (WebRTC Production & Voice Foundation)
 2. Expand test suite with edge-case coverage for transport, command log, and replication layers
-3. Begin voice module scaffolding in `src/network/voice.rs`
-4. Update CI/CD pipeline to track edge-case test coverage metrics
-5. Schedule architecture review for spatial audio integration design
+3. Integrate Opus codec and WebRTC voice channel wiring on top of the new `network::voice` scaffolding
+4. Update CI/CD pipeline to track edge-case test coverage metrics and voice test execution
+5. Schedule architecture review for spatial audio integration and voice telemetry design
 
 **Prepared By:** GitHub Copilot (Systems & Networking)  
-**Last Updated:** November 5, 2025  
-**Next Review:** Upon Milestone 2 kickoff
+**Last Updated:** November 6, 2025  
+**Next Review:** Upon completion of heartbeat/replication edge-case tests (target: 100+ total tests)

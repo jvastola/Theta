@@ -21,6 +21,7 @@ network-quic = [
 	"futures-util",
 	"bytes",
 	"url",
+	"audiopus",
 ]
 command-log-persistence = []
 
@@ -50,6 +51,7 @@ tokio-util = { version = "0.7", optional = true }
 futures-util = { version = "0.3", optional = true }
 bytes = { version = "1", optional = true }
 url = { version = "2", optional = true }
+audiopus = { version = "0.3.0-rc.0", features = ["coder"], optional = true }
 
 [build-dependencies]
 which = "4"

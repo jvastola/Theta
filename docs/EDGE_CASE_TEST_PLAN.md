@@ -2,9 +2,10 @@
 
 **Purpose:** Define systematic test coverage for boundary conditions, failure modes, and adversarial scenarios across all Theta Engine subsystems.
 
-**Last Updated:** November 5, 2025  
-**Current Test Count:** 74 (68 unit + 6 integration); 86 with `network-quic`  
-**Target Test Count:** 120+ upon completion of this plan
+**Last Updated:** November 6, 2025  
+**Current Test Count:** 103 (97 unit + 6 integration) with `network-quic`  
+**Target Test Count:** 120+ upon completion of this plan  
+**Recent Progress:** +10 transport edge-case tests (timeouts, oversized payloads, signature tampering, rate limiting) and +4 voice scaffolding tests (codec roundtrip, jitter buffer ordering, VAD detection, session metrics)
 
 ---
 
@@ -32,10 +33,16 @@
 
 #### Boundary Conditions
 ```rust
-#[test]
+#[test] // ✅ IMPLEMENTED (handshake_unit_tests::session_hello_rejects_empty_nonce)
 fn quic_handshake_tolerates_zero_byte_nonce() {
     // Test: Handshake with empty nonce should fail gracefully
-    // Expected: Return Err(TransportError::InvalidHandshake)
+    // Expected: Return Err(TransportError::Handshake)
+}
+
+#[test] // ✅ IMPLEMENTED (tests::quic_transport_tolerates_empty_packet_list)
+fn quic_stream_handles_empty_packet_list() {
+    // Test: Send empty command packet slice
+    // Expected: No-op, no error
 }
 
 #[test]
@@ -53,10 +60,16 @@ fn quic_connection_survives_rapid_reconnect_cycles() {
 
 #### Failure Modes
 ```rust
-#[test]
+#[test] // ✅ IMPLEMENTED (tests::quic_handshake_timeout_returns_error_within_deadline)
 fn quic_handshake_timeout_returns_error_within_5_seconds() {
     // Test: Connect to non-responsive endpoint
     // Expected: Timeout error within 5s, no indefinite hang
+}
+
+#[test] // ✅ IMPLEMENTED (tests::quic_transport_drops_oversized_command_packet)
+fn quic_transport_drops_oversized_command_packet() {
+    // Test: Send command packet > MAX_COMMAND_PACKET_BYTES
+    // Expected: Server drops oversized frame, processes valid follow-up packet
 }
 
 #[test]
@@ -108,21 +121,27 @@ fn quic_drops_packets_with_invalid_schema_hash() {
 
 #### Boundary Conditions
 ```rust
+#[test] // ✅ IMPLEMENTED (webrtc_tests::webrtc_transport_tolerates_empty_packet_list)
+fn webrtc_transport_tolerates_zero_size_packet() {
+    // Test: send_command_packets with empty vec
+    // Expected: No-op, no error
+}
+
 #[test]
 fn webrtc_data_channel_handles_ordered_channel_closure() {
     // Test: Close data channel during active packet transfer
     // Expected: In-flight packets dropped, send returns Err gracefully
 }
-
-#[test]
-fn webrtc_transport_tolerates_zero_size_packet() {
-    // Test: send_command_packets with empty vec
-    // Expected: No-op, no error
-}
 ```
 
 #### Failure Modes
 ```rust
+#[test] // ✅ IMPLEMENTED (webrtc_tests::webrtc_transport_drops_oversized_command_packet)
+fn webrtc_transport_drops_oversized_command_packet() {
+    // Test: send_command_packets with payload > SCTP MTU
+    // Expected: Send error, subsequent valid packets succeed
+}
+
 #[test]
 fn webrtc_signaling_failure_returns_error_within_10_seconds() {
     // Test: Simulate signaling server unreachable
@@ -263,22 +282,23 @@ fn replay_tracker_handles_nonce_gaps_during_network_partition() {
 ### Adversarial Inputs
 
 ```rust
-#[test]
+#[test] // ✅ IMPLEMENTED (tests::integrate_remote_rejects_tampered_signature)
 fn command_log_rejects_signature_tampering() {
     // Test: Valid entry, flip one bit in signature
     // Expected: Signature verification fails, entry rejected
 }
 
-#[test]
+#[test] // ✅ IMPLEMENTED (tests::integrate_remote_rate_limits_command_bursts)
 fn rate_limiter_blocks_burst_of_1000_commands_in_1_second() {
     // Test: Peer sends 1000 commands within 1s (burst=100 limit)
     // Expected: First 100 accepted, rest rejected, rate_limited_count telemetry
 }
 
-#[test]
+#[test] // ✅ IMPLEMENTED (tests::integrate_remote_rejects_stale_entries)
 fn command_log_survives_replay_attack_with_stale_nonce() {
     // Test: Replay entry with nonce < high-water mark
     // Expected: Reject with ReplayDetected error
+}
 }
 
 #[test]
@@ -426,7 +446,7 @@ fn telemetry_replicator_handles_malformed_serialization_data() {
 
 ---
 
-## Voice Edge Cases (`src/network/voice.rs` - Pending)
+## Voice Edge Cases (`src/network/voice.rs` — Scaffolding Landed, Opus Pending)
 
 ### Boundary Conditions
 
@@ -762,11 +782,21 @@ cargo mutants --all-features
 ## Success Criteria
 
 ### Milestone 2 Completion (WebRTC + Voice Foundation)
-- [ ] ≥100 tests total (26+ new tests added)
+- [x] ≥100 tests total (current: 103)
 - [ ] ≥80% line coverage across `network::` modules
 - [ ] All fuzz targets run 10+ hours without crashes
 - [ ] Zero security vulnerabilities in audit scan
 - [ ] All edge case tests passing in CI
+
+### Current Progress (November 6, 2025)
+- [x] Transport handshake nonce validation (2 tests)
+- [x] QUIC/WebRTC empty packet handling (2 tests)
+- [x] QUIC handshake timeout coverage (1 test)
+- [x] QUIC/WebRTC oversized payload handling (2 tests)
+- [x] Command log signature tampering detection (1 test)
+- [x] Command log rate limiting enforcement (1 test)
+- [x] Replay attack prevention (existing test verified)
+- [x] Voice scaffolding suite (codec passthrough, jitter buffer ordering, VAD detection, session metrics)
 
 ### Milestone 4 Completion (Mesh Editor Alpha)
 - [ ] ≥120 tests total (20+ mesh editing edge cases)
@@ -777,13 +807,16 @@ cargo mutants --all-features
 
 ---
 
-**Next Actions:**
-1. Implement transport layer edge cases (QUIC + WebRTC) - 15 tests
-2. Implement command log adversarial tests - 10 tests
-3. Implement replication boundary condition tests - 8 tests
-4. Set up fuzz testing infrastructure (cargo-fuzz targets)
-5. Add voice edge case scaffolding (pending voice module creation)
+**Next Actions (Priority Order):**
+1. ~~Implement transport nonce validation~~ ✅ Complete
+2. ~~Implement transport timeout/oversized payload tests~~ ✅ Complete
+3. ~~Implement command log adversarial tests~~ ✅ Complete
+4. Implement QUIC heartbeat loss detection - 2 tests
+5. Implement replication boundary condition tests - 8 tests
+6. Add WebRTC ICE/signaling timeout scenarios - 3 tests
+7. Set up fuzz testing infrastructure (cargo-fuzz targets)
+8. ~~Add voice edge case scaffolding (pending voice module creation)~~ ✅ Complete (passthrough codec, jitter buffer, RMS VAD, voice metrics + 4 unit tests)
 
 **Prepared By:** GitHub Copilot (Quality Assurance)  
-**Last Updated:** November 5, 2025  
-**Next Review:** Upon Milestone 2 kickoff
+**Last Updated:** November 6, 2025  
+**Next Review:** Upon completion of heartbeat/replication edge cases

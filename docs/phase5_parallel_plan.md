@@ -5,9 +5,10 @@
 **Audience:** Networking, Systems, Editor, Platform/Infra teams
 
 ## Context
-- Phase 4 (Command Log & Conflict Resolution) is complete. Metrics, telemetry, and extended editor command vocabulary are merged and validated (74 tests passing as of Nov 5).
+- Phase 4 (Command Log & Conflict Resolution) is complete. Metrics, telemetry, and extended editor command vocabulary are merged and validated (103 tests passing with all features as of Nov 6).
 - Phase 5 objectives focus on production hardening: securing the command pipeline, strengthening transports, adding performance instrumentation, and preparing documentation for broader team onboarding.
 - The roadmap accelerates into overlapping workstreams so that Networking/Security, Systems/Telemetry, Editor Tools, and Platform/Infra can execute in parallel while sharing common integration checkpoints.
+- Voice subsystem scaffolding (passthrough codec, jitter buffer, RMS VAD, session metrics) is now in place to unblock Opus/WebRTC integration work.
 
 ## Architectural Priorities
 1. **Secure Command Replication:** Nonce-based replay protection, rate limiting, and payload validation ensure trust boundaries as collaboration scales beyond trusted LAN peers.
@@ -64,6 +65,12 @@
 - [ ] **Tool Matrix:** Add integration tests for each tool command, asserting ECS state changes and telemetry hooks.
 - [ ] **Mesh Pipeline:** Skeleton tests for mesh command payloads, undo/redo stack, and error handling.
 - [ ] **QA Automation:** Link tool matrix to automated test coverage reports for sign-off.
+
+### Audio & Voice
+- [x] Land voice scaffolding in `network::voice` (passthrough codec, jitter buffer, RMS VAD, voice metrics, unit tests).
+- [ ] Integrate Opus codec and reconnect logic with WebRTC data channels.
+- [ ] Add voice telemetry overlay panels (active speakers, packet loss, bitrate).
+- [ ] Expand voice edge-case tests (burst loss recovery, background noise rejection, reconnection paths).
 
 ### Platform / Infra
 - [ ] Update architecture diagrams (transport, telemetry, command flow) to reflect Phase 5 changes.
