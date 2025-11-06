@@ -10,7 +10,8 @@ pub struct OpenXrInputProvider {
 
 impl OpenXrInputProvider {
     pub fn initialize() -> Result<Self, VrError> {
-        let entry = Entry::load()
+        // Safety: OpenXR loader discovery only touches process-local state and returns an error on failure.
+        let entry = unsafe { Entry::load() }
             .map_err(|err| VrError::new(format!("failed to load OpenXR loader: {err}")))?;
         let app_info = ApplicationInfo {
             application_name: "Theta Engine",

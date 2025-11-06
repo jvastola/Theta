@@ -98,7 +98,7 @@ impl fmt::Display for EcsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EcsError::NoSuchEntity(entity) => {
-                write!(f, "entity {:?} is not alive in this world", entity)
+                write!(f, "entity {entity:?} is not alive in this world")
             }
         }
     }

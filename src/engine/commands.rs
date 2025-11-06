@@ -103,8 +103,8 @@ impl CommandPipeline {
                 .require_signature(false)
                 .build(),
         );
-        let registry = Arc::new(registry);
-        let verifier = Arc::new(NoopSignatureVerifier::default()) as Arc<dyn SignatureVerifier>;
+    let registry = Arc::new(registry);
+    let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
         let log = CommandLog::new(Arc::clone(&registry), verifier);
         let author = CommandAuthor::new(AuthorId(0), CommandRole::Editor);
         let signer: Box<dyn CommandSigner> = Box::new(NoopCommandSigner::new(author));
@@ -357,6 +357,12 @@ impl CommandPipeline {
     #[cfg(feature = "network-quic")]
     pub fn attach_transport_session(&mut self, session: &TransportSession) {
         self.session.attach_transport_session(session);
+    }
+}
+
+impl Default for CommandPipeline {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

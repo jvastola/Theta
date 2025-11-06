@@ -87,7 +87,7 @@ pub struct TelemetrySurface {
 impl TelemetrySurface {
     pub fn record(&mut self, telemetry: FrameTelemetry) -> bool {
         let frame = telemetry.frame;
-        let changed = self.last_frame.map_or(true, |last| last != frame);
+        let changed = self.last_frame != Some(frame);
         self.last_frame = Some(frame);
         self.latest = Some(telemetry);
         changed
@@ -248,7 +248,7 @@ impl TelemetryOverlay {
                 let mut conflicts: Vec<String> = commands
                     .conflict_rejections
                     .iter()
-                    .map(|(strategy, count)| format!("{:?}:{}", strategy, count))
+                    .map(|(strategy, count)| format!("{strategy:?}:{count}"))
                     .collect();
                 conflicts.sort();
                 lines.push(format!("    Conflicts {}", conflicts.join(", ")));
@@ -295,42 +295,50 @@ mod tests {
     use crate::network::{ChangeSet, DiffPayload};
     use proptest::prelude::*;
 
-    fn build_sample(
-        frame: u64,
-        average: f32,
+    struct StageSeries {
         totals: [f32; Stage::count()],
         sequential: [f32; Stage::count()],
         parallel: [f32; Stage::count()],
         rolling: [f32; Stage::count()],
-        violations: [bool; Stage::count()],
-        violation_counts: [u32; Stage::count()],
+    }
+
+    struct ViolationSeries {
+        flags: [bool; Stage::count()],
+        counts: [u32; Stage::count()],
+    }
+
+    fn build_sample(
+        frame: u64,
+        average: f32,
+        stage_series: StageSeries,
+        violations: ViolationSeries,
         triggers: [f32; 2],
     ) -> FrameTelemetry {
         FrameTelemetry::from_stage_arrays(
             frame,
             average,
-            &totals,
-            &sequential,
-            &parallel,
-            &rolling,
-            &violations,
-            &violation_counts,
+            &stage_series.totals,
+            &stage_series.sequential,
+            &stage_series.parallel,
+            &stage_series.rolling,
+            &violations.flags,
+            &violations.counts,
             triggers,
         )
     }
 
     fn static_sample(frame: u64) -> FrameTelemetry {
-        build_sample(
-            frame,
-            4.2,
-            [1.0, 2.0, 3.0, 4.0],
-            [0.5, 1.0, 1.5, 2.0],
-            [0.25, 0.5, 0.75, 1.0],
-            [1.0, 2.0, 3.0, 4.0],
-            [false, true, false, true],
-            [0, 1, 0, 2],
-            [0.1, 0.9],
-        )
+        let stage_series = StageSeries {
+            totals: [1.0, 2.0, 3.0, 4.0],
+            sequential: [0.5, 1.0, 1.5, 2.0],
+            parallel: [0.25, 0.5, 0.75, 1.0],
+            rolling: [1.0, 2.0, 3.0, 4.0],
+        };
+        let violations = ViolationSeries {
+            flags: [false, true, false, true],
+            counts: [0, 1, 0, 2],
+        };
+        build_sample(frame, 4.2, stage_series, violations, [0.1, 0.9])
     }
 
     #[test]
@@ -391,7 +399,7 @@ mod tests {
                     telemetry.stage_samples[3].violation_count
                 );
             }
-            other => panic!("expected insert payload, got {:?}", other),
+            other => panic!("expected insert payload, got {other:?}"),
         }
 
         let follow_up = static_sample(6);
@@ -407,7 +415,7 @@ mod tests {
                     serde_json::from_slice(bytes).expect("telemetry should deserialize");
                 assert_eq!(round_trip.frame, follow_up.frame);
             }
-            other => panic!("expected update payload, got {:?}", other),
+            other => panic!("expected update payload, got {other:?}"),
         }
     }
 
@@ -507,18 +515,36 @@ mod tests {
             let mut history: [Vec<ChangeSet>; PUBLISHERS] = std::array::from_fn(|_| Vec::new());
             let mut expectations: [Vec<FrameTelemetry>; PUBLISHERS] = std::array::from_fn(|_| Vec::new());
 
-            for (publisher, frame, avg_i16, totals, sequential, parallel, rolling, violations, counts, trigger_vals) in ops {
+            for (
+                publisher,
+                frame,
+                avg_i16,
+                totals,
+                sequential,
+                parallel,
+                rolling,
+                violation_flags,
+                violation_counts,
+                trigger_vals,
+            ) in ops
+            {
                 let index = publisher % PUBLISHERS;
                 let average = (avg_i16 as f32).abs() / 100.0 + 0.001;
-                let telemetry = build_sample(
-                    frame,
-                    average,
+                let stage_series = StageSeries {
                     totals,
                     sequential,
                     parallel,
                     rolling,
+                };
+                let violations = ViolationSeries {
+                    flags: violation_flags,
+                    counts: violation_counts,
+                };
+                let telemetry = build_sample(
+                    frame,
+                    average,
+                    stage_series,
                     violations,
-                    counts,
                     trigger_vals,
                 );
 
@@ -535,7 +561,11 @@ mod tests {
             for (index, changes) in history.iter().enumerate() {
                 for (sequence_idx, change) in changes.iter().enumerate() {
                     let expected_frame = &expectations[index][sequence_idx];
-                    assert_eq!(change.sequence, (sequence_idx as u64) + 1, "publisher {} sequence mismatch", index);
+                    assert_eq!(
+                        change.sequence,
+                        (sequence_idx as u64) + 1,
+                        "publisher {index} sequence mismatch"
+                    );
                     assert_eq!(change.diffs.len(), 1);
                     let diff = &change.diffs[0];
                     assert_eq!(diff.entity.index, entities[index].index());
@@ -559,10 +589,7 @@ mod tests {
                             }
                         }
                         (payload, is_first) => panic!(
-                            "unexpected payload {:?} at position {} (is_first={})",
-                            payload,
-                            sequence_idx,
-                            is_first
+                            "unexpected payload {payload:?} at position {sequence_idx} (is_first={is_first})"
                         ),
                     }
                 }

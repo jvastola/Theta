@@ -15,7 +15,7 @@ use crate::editor::{CommandOutbox, CommandTransportQueue};
 use crate::network::EntityHandle;
 use crate::network::command_log::{CommandBatch, CommandEntry, CommandPacket, CommandScope};
 #[cfg(feature = "network-quic")]
-use crate::network::transport::TransportSession;
+use crate::network::transport::{TransportError, TransportSession};
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
 #[cfg(feature = "vr-openxr")]
 use crate::vr::openxr::OpenXrInputProvider;
@@ -85,8 +85,10 @@ impl Engine {
     }
 
     pub fn with_backend(backend: BackendKind) -> Self {
-        let mut config = RendererConfig::default();
-        config.backend = backend;
+        let config = RendererConfig {
+            backend,
+            ..RendererConfig::default()
+        };
         Self::with_renderer_config(config)
     }
 
@@ -365,7 +367,7 @@ impl Engine {
 
     fn create_backend(kind: BackendKind) -> Box<dyn GpuBackend> {
         match kind {
-            BackendKind::Null => Box::new(NullGpuBackend::default()),
+            BackendKind::Null => Box::new(NullGpuBackend),
             BackendKind::Wgpu => {
                 #[cfg(feature = "render-wgpu")]
                 {
@@ -375,7 +377,7 @@ impl Engine {
                             eprintln!(
                                 "[engine] failed to initialize wgpu backend ({err}); falling back to Null"
                             );
-                            Box::new(NullGpuBackend::default())
+                            Box::new(NullGpuBackend)
                         }
                     }
                 }
@@ -385,7 +387,7 @@ impl Engine {
                     eprintln!(
                         "[engine] wgpu backend requested but 'render-wgpu' feature is disabled; falling back to Null"
                     );
-                    Box::new(NullGpuBackend::default())
+                    Box::new(NullGpuBackend)
                 }
             }
         }
@@ -465,19 +467,10 @@ impl Default for EditorSelection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct EditorToolState {
     active_tool: Option<String>,
     last_lamport: Option<u64>,
-}
-
-impl Default for EditorToolState {
-    fn default() -> Self {
-        Self {
-            active_tool: None,
-            last_lamport: None,
-        }
-    }
 }
 
 impl EditorToolState {
@@ -549,8 +542,10 @@ fn initialize_actor(world: &mut World) -> crate::ecs::Entity {
 }
 
 fn initialize_editor_state(world: &mut World, primary: crate::ecs::Entity) -> crate::ecs::Entity {
-    let mut selection = EditorSelection::default();
-    selection.primary = Some(primary);
+    let selection = EditorSelection {
+        primary: Some(primary),
+        ..EditorSelection::default()
+    };
     let entity = world.spawn();
     world
         .insert(entity, selection)
@@ -754,7 +749,7 @@ impl Engine {
                                     if let Some(queue) =
                                         world.get_mut::<CommandTransportQueue>(entity)
                                     {
-                                        queue.enqueue(packets_to_send.into_iter());
+                                        queue.enqueue(packets_to_send);
                                     }
                                 } else {
                                     log::debug!(
@@ -766,7 +761,7 @@ impl Engine {
                                 let world = self.scheduler.world_mut();
                                 if let Some(queue) = world.get_mut::<CommandTransportQueue>(entity)
                                 {
-                                    queue.enqueue(packets_to_send.into_iter());
+                                    queue.enqueue(packets_to_send);
                                 }
                             }
                         }
@@ -816,21 +811,7 @@ impl Engine {
     #[cfg(feature = "network-quic")]
     fn poll_remote_commands(&mut self) {
         loop {
-            let packet_result = {
-                let session = match self.transport_session.as_ref() {
-                    Some(session) => session,
-                    None => return,
-                };
-                let runtime = self.network_runtime.get_or_insert_with(|| {
-                    TokioRuntimeBuilder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("create network runtime")
-                });
-                runtime.block_on(session.receive_command_packet(Duration::from_millis(0)))
-            };
-
-            let packet = match packet_result {
+            let packet = match self.receive_next_command_packet() {
                 Ok(Some(packet)) => packet,
                 Ok(None) => break,
                 Err(err) => {
@@ -866,6 +847,25 @@ impl Engine {
         }
     }
 
+    #[cfg(feature = "network-quic")]
+    fn receive_next_command_packet(
+        &mut self,
+    ) -> Result<Option<CommandPacket>, TransportError> {
+        let session = match self.transport_session.as_ref() {
+            Some(session) => session,
+            None => return Ok(None),
+        };
+
+        let runtime = self.network_runtime.get_or_insert_with(|| {
+            TokioRuntimeBuilder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("create network runtime")
+        });
+
+        runtime.block_on(session.receive_command_packet(Duration::from_millis(0)))
+    }
+
     #[cfg_attr(not(any(feature = "network-quic", test)), allow(dead_code))]
     fn apply_remote_entries(&mut self, entries: &[CommandEntry]) {
         if entries.is_empty() {
@@ -883,8 +883,8 @@ impl Engine {
                 CMD_SELECTION_HIGHLIGHT => {
                     if !matches!(entry.payload.scope, CommandScope::Entity(_)) {
                         log::warn!(
-                            "[commands] selection highlight command missing entity scope (id {:?})",
-                            entry.id
+                            "[commands] selection highlight command missing entity scope (id {id:?})",
+                            id = entry.id
                         );
                         continue;
                     }
@@ -900,8 +900,8 @@ impl Engine {
                                         selection.primary = Some(target_entity);
                                     } else {
                                         log::warn!(
-                                            "[commands] remote highlight target {:?} missing locally",
-                                            command.entity
+                                            "[commands] remote highlight target {entity:?} missing locally",
+                                            entity = command.entity
                                         );
                                     }
                                     selection.highlight_active = command.active;
@@ -909,8 +909,7 @@ impl Engine {
                                 }
                                 None => {
                                     log::warn!(
-                                        "[commands] editor selection component missing on {:?}",
-                                        editor_entity
+                                        "[commands] editor selection component missing on {editor_entity:?}"
                                     );
                                 }
                             }
@@ -934,8 +933,8 @@ impl Engine {
                                 }
                             } else {
                                 log::warn!(
-                                    "[commands] translate target {:?} missing transform",
-                                    command.entity
+                                    "[commands] translate target {entity:?} missing transform",
+                                    entity = command.entity
                                 );
                             }
                         }
@@ -959,8 +958,8 @@ impl Engine {
                                 ];
                             } else {
                                 log::warn!(
-                                    "[commands] rotate target {:?} missing transform",
-                                    command.entity
+                                    "[commands] rotate target {entity:?} missing transform",
+                                    entity = command.entity
                                 );
                             }
                         }
@@ -979,8 +978,8 @@ impl Engine {
                                 transform.scale = sanitize_scale(command.scale);
                             } else {
                                 log::warn!(
-                                    "[commands] scale target {:?} missing transform",
-                                    command.entity
+                                    "[commands] scale target {entity:?} missing transform",
+                                    entity = command.entity
                                 );
                             }
                         }
@@ -1000,8 +999,7 @@ impl Engine {
                                 tool_state.activate(command.tool_id.clone(), entry.id.lamport());
                             } else {
                                 log::warn!(
-                                    "[commands] editor tool state component missing on {:?}",
-                                    editor_entity
+                                    "[commands] editor tool state component missing on {editor_entity:?}"
                                 );
                             }
                         }
@@ -1023,8 +1021,7 @@ impl Engine {
                                 }
                             } else {
                                 log::warn!(
-                                    "[commands] editor tool state component missing on {:?}",
-                                    editor_entity
+                                    "[commands] editor tool state component missing on {editor_entity:?}"
                                 );
                             }
                         }
@@ -1086,8 +1083,7 @@ impl Engine {
                 }
                 other => {
                     log::debug!(
-                        "[commands] ignoring unhandled remote command type {}",
-                        other
+                        "[commands] ignoring unhandled remote command type {other}"
                     );
                 }
             }
@@ -1183,13 +1179,13 @@ mod tests {
             original_position = transform.position;
         }
 
-        let translate = EntityTranslateCommand::new(handle.clone(), [0.5, -0.25, 0.0]);
+    let translate = EntityTranslateCommand::new(handle, [0.5, -0.25, 0.0]);
         let translate_entry = CommandEntry::new(
             CommandId::new(10, AuthorId(1)),
             1,
             CommandPayload::new(
                 CMD_ENTITY_TRANSLATE,
-                CommandScope::Entity(handle.clone()),
+                CommandScope::Entity(handle),
                 serde_json::to_vec(&translate).unwrap(),
             ),
             ConflictStrategy::Merge,
@@ -1206,7 +1202,7 @@ mod tests {
         assert!((mutated.position[1] - (original_position[1] - 0.25)).abs() < 1e-5);
 
         let rotate = EntityRotateCommand::new(
-            handle.clone(),
+            handle,
             Quaternion::new(0.0, 0.0, 0.707_106_77, 0.707_106_77),
         );
         let rotate_entry = CommandEntry::new(
@@ -1214,7 +1210,7 @@ mod tests {
             2,
             CommandPayload::new(
                 CMD_ENTITY_ROTATE,
-                CommandScope::Entity(handle.clone()),
+                CommandScope::Entity(handle),
                 serde_json::to_vec(&rotate).unwrap(),
             ),
             ConflictStrategy::LastWriteWins,
@@ -1229,13 +1225,13 @@ mod tests {
             .expect("transform present");
         assert!((rotated.rotation[3] - 0.707_106_77).abs() < 1e-5);
 
-        let scale = EntityScaleCommand::new(handle.clone(), [2.0, 1.0, 0.5]);
+    let scale = EntityScaleCommand::new(handle, [2.0, 1.0, 0.5]);
         let scale_entry = CommandEntry::new(
             CommandId::new(12, AuthorId(1)),
             3,
             CommandPayload::new(
                 CMD_ENTITY_SCALE,
-                CommandScope::Entity(handle.clone()),
+                CommandScope::Entity(handle),
                 serde_json::to_vec(&scale).unwrap(),
             ),
             ConflictStrategy::LastWriteWins,

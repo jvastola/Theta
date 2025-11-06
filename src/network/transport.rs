@@ -111,8 +111,9 @@ struct TransportMetricsInner {
 
 impl TransportMetricsHandle {
     pub fn new() -> Self {
-        let mut inner = TransportMetricsInner::default();
-        inner.latest = Some(TransportDiagnostics::default());
+        let inner = TransportMetricsInner {
+            latest: Some(TransportDiagnostics::default()),
+        };
         Self {
             inner: Arc::new(Mutex::new(inner)),
         }
@@ -132,6 +133,12 @@ impl TransportMetricsHandle {
                 .get_or_insert_with(TransportDiagnostics::default);
             apply(metrics);
         }
+    }
+}
+
+impl Default for TransportMetricsHandle {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -490,13 +497,12 @@ fn parse_session_hello(
     }
     let capabilities = hello
         .requested_capabilities()
-        .map(|vec| vec.iter().copied().collect::<Vec<u32>>())
+        .map(|vec| vec.iter().collect::<Vec<u32>>())
         .unwrap_or_default();
     let public_key_bytes: Vec<u8> = hello
         .client_public_key()
         .ok_or_else(|| TransportError::Handshake("missing client public key".into()))?
     .iter()
-    .copied()
     .collect();
     if public_key_bytes.len() != 32 {
         return Err(TransportError::Handshake(
@@ -507,7 +513,6 @@ fn parse_session_hello(
         .client_nonce()
         .ok_or_else(|| TransportError::Handshake("missing client nonce".into()))?
     .iter()
-    .copied()
     .collect();
     Ok(SessionHelloData {
         capabilities,
@@ -538,13 +543,12 @@ fn parse_session_ack(
     }
     let capability_mask = ack
         .capability_mask()
-        .map(|vec| vec.iter().copied().collect::<Vec<u32>>())
+        .map(|vec| vec.iter().collect::<Vec<u32>>())
         .unwrap_or_default();
     let public_key_bytes: Vec<u8> = ack
         .server_public_key()
         .ok_or_else(|| TransportError::Handshake("missing server public key".into()))?
     .iter()
-    .copied()
     .collect();
     if public_key_bytes.len() != 32 {
         return Err(TransportError::Handshake(
@@ -555,7 +559,6 @@ fn parse_session_ack(
         .server_nonce()
         .ok_or_else(|| TransportError::Handshake("missing server nonce".into()))?
     .iter()
-    .copied()
     .collect();
 
     Ok(SessionAckData {
@@ -739,7 +742,7 @@ impl HeartbeatActor {
                 sequence = sequence.wrapping_add(1);
                 let snapshot = send_handle_metrics
                     .latest()
-                    .unwrap_or_else(TransportDiagnostics::default);
+                    .unwrap_or_default();
                 let payload = build_heartbeat_message(sequence, snapshot.clone());
                 if write_frame_locked(&control_send, payload).await.is_err() {
                     break;

@@ -56,6 +56,6 @@ fn engine_emits_change_sets_after_running() {
             assert!(!decoded_render.read_only_violation);
             assert_eq!(decoded_render.violation_count, 0);
         }
-        other => panic!("expected update payload, got {:?}", other),
+    other => panic!("expected update payload, got {other:?}"),
     }
 }

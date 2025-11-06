@@ -24,9 +24,9 @@ pub mod transport {
 }
 
 #[cfg(has_generated_network_schema)]
-#[allow(dead_code)]
+#[allow(dead_code, unused_imports)]
+#[allow(clippy::all)]
 pub mod wire {
-    #![allow(clippy::all, unused_imports)]
     include!(concat!(
         env!("OUT_DIR"),
         "/flatbuffers/network_generated.rs"
@@ -239,6 +239,12 @@ impl NetworkSession {
             timestamp_ms: current_time_millis(),
             entries,
         }
+    }
+}
+
+impl Default for NetworkSession {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

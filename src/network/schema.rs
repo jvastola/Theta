@@ -45,7 +45,7 @@ pub fn register_entry(entry: ComponentManifestEntry) {
 pub fn registered_entries() -> Vec<ComponentManifestEntry> {
     let guard = REGISTRY.lock().expect("component registry mutex poisoned");
     let mut entries = guard.clone();
-    entries.sort_by(|a, b| a.type_name.cmp(&b.type_name));
+    entries.sort_by(|a, b| a.type_name.cmp(b.type_name));
     entries
 }
 
