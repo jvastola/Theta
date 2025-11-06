@@ -1,6 +1,7 @@
 use super::{TransportDiagnostics, TransportKind, current_time_millis};
 use crate::network::command_log::{CommandPacket, MAX_COMMAND_PACKET_BYTES};
 use crate::network::wire;
+use bytes::Bytes;
 use ed25519_dalek::SigningKey;
 use flatbuffers::{FlatBufferBuilder, UnionWIPOffset, WIPOffset};
 use quinn::{self, Connection, ReadExactError, ReadToEndError, RecvStream, SendStream};
@@ -12,7 +13,30 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+#[cfg(test)]
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+#[cfg(test)]
+use webrtc::api::interceptor_registry::register_default_interceptors;
+#[cfg(test)]
+use webrtc::api::media_engine::MediaEngine;
+#[cfg(test)]
+use webrtc::api::{API, APIBuilder};
+use webrtc::data_channel::RTCDataChannel;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
+#[cfg(test)]
+use webrtc::interceptor::registry::Registry;
+use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+
+#[cfg(test)]
+use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
+#[cfg(test)]
+use webrtc::data_channel::data_channel_state::RTCDataChannelState;
+#[cfg(test)]
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+#[cfg(test)]
+use webrtc::peer_connection::configuration::RTCConfiguration;
 
 #[cfg(not(has_generated_network_schema))]
 compile_error!(
@@ -55,6 +79,8 @@ pub enum TransportError {
     ReadToEnd(#[from] ReadToEndError),
     #[error("transport unsupported: {0}")]
     Unsupported(&'static str),
+    #[error("webrtc error: {0}")]
+    WebRtc(String),
 }
 
 #[cfg(test)]
@@ -67,7 +93,9 @@ mod webrtc_tests {
 
     #[tokio::test]
     async fn webrtc_transport_transfers_command_packets() {
-        let (sender, receiver) = WebRtcTransport::pair();
+        let (sender, receiver) = WebRtcTransport::pair()
+            .await
+            .expect("create loopback WebRTC pair");
 
         let author = CommandAuthor::new(AuthorId(9), CommandRole::Editor);
         let payload = CommandPayload::new("transport.test", CommandScope::Global, vec![1, 2, 3]);
@@ -94,12 +122,13 @@ mod webrtc_tests {
                 .send_command_packets(std::slice::from_ref(&send_packet))
                 .await
                 .expect("send over WebRTC");
+            tokio::time::sleep(Duration::from_millis(100)).await;
             sender.close().await;
         });
 
         let metrics_handle = receiver.metrics_handle();
         let received = receiver
-            .receive_command_packet(Duration::from_millis(100))
+            .receive_command_packet(Duration::from_secs(2))
             .await
             .expect("receive command packet")
             .expect("packet present");
@@ -370,13 +399,21 @@ impl TransportSession {
 }
 
 pub struct WebRtcTransport {
-    send: UnboundedSender<Vec<u8>>,
-    recv: Arc<TokioMutex<UnboundedReceiver<Vec<u8>>>>,
+    peer: Arc<RTCPeerConnection>,
+    channel: Arc<RTCDataChannel>,
+    inbox: Arc<TokioMutex<UnboundedReceiver<Vec<u8>>>>,
+    _inbox_sender: Arc<UnboundedSender<Vec<u8>>>,
     metrics: TransportMetricsHandle,
 }
 
 impl WebRtcTransport {
-    pub fn new(send: UnboundedSender<Vec<u8>>, recv: UnboundedReceiver<Vec<u8>>) -> Self {
+    pub fn from_parts(peer: Arc<RTCPeerConnection>, channel: Arc<RTCDataChannel>) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let sender = Arc::new(tx);
+        let inbox_sender = Arc::clone(&sender);
+        let msg_sender = Arc::clone(&sender);
+        let inbox = Arc::new(TokioMutex::new(rx));
+
         let metrics = TransportMetricsHandle::new();
         metrics.update(|m| {
             m.kind = TransportKind::WebRtc;
@@ -384,9 +421,55 @@ impl WebRtcTransport {
                 m.compression_ratio = 1.0;
             }
         });
+
+        let metrics_for_open = metrics.clone();
+        let channel_for_open = Arc::clone(&channel);
+        channel_for_open.on_open(Box::new(move || {
+            let metrics = metrics_for_open.clone();
+            Box::pin(async move {
+                metrics.update(|m| m.kind = TransportKind::WebRtc);
+            })
+        }));
+
+        let metrics_for_close = metrics.clone();
+        let channel_for_close = Arc::clone(&channel);
+        channel_for_close.on_close(Box::new(move || {
+            let metrics = metrics_for_close.clone();
+            Box::pin(async move {
+                metrics.update(|m| m.kind = TransportKind::WebRtc);
+            })
+        }));
+
+        let metrics_for_state = metrics.clone();
+        peer.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
+            let metrics = metrics_for_state.clone();
+            Box::pin(async move {
+                metrics.update(|m| {
+                    m.kind = TransportKind::WebRtc;
+                    if matches!(
+                        state,
+                        RTCPeerConnectionState::Disconnected | RTCPeerConnectionState::Failed
+                    ) {
+                        m.command_latency_ms = 0.0;
+                    }
+                });
+            })
+        }));
+
+        let channel_for_messages = Arc::clone(&channel);
+        channel_for_messages.on_message(Box::new(move |msg: DataChannelMessage| {
+            let sender = msg_sender.clone();
+            Box::pin(async move {
+                let payload = msg.data.to_vec();
+                let _ = sender.send(payload);
+            })
+        }));
+
         Self {
-            send,
-            recv: Arc::new(TokioMutex::new(recv)),
+            peer,
+            channel,
+            inbox,
+            _inbox_sender: inbox_sender,
             metrics,
         }
     }
@@ -400,17 +483,6 @@ impl WebRtcTransport {
         TransportKind::WebRtc
     }
 
-    pub fn pair() -> (Self, Self) {
-        let (a_tx, a_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (b_tx, b_rx) = tokio::sync::mpsc::unbounded_channel();
-        (Self::new(a_tx, b_rx), Self::new(b_tx, a_rx))
-    }
-
-    pub async fn close(self) {
-        // Dropping the sender notifies the remote peer that the channel is closed.
-        drop(self);
-    }
-
     pub async fn send_command_packets(
         &self,
         packets: &[CommandPacket],
@@ -421,12 +493,16 @@ impl WebRtcTransport {
 
         let send_start = Instant::now();
         let mut total_bytes = 0usize;
+
         for packet in packets {
             let frame = encode_command_packet_frame(packet)?;
-            total_bytes = total_bytes.saturating_add(frame.len());
-            self.send
-                .send(frame)
-                .map_err(|_| TransportError::Protocol("WebRTC data channel closed".into()))?;
+            let frame_len = frame.len();
+            total_bytes = total_bytes.saturating_add(frame_len);
+            let payload = Bytes::from(frame);
+            self.channel
+                .send(&payload)
+                .await
+                .map_err(|err| TransportError::WebRtc(err.to_string()))?;
         }
 
         let sent = packets.len() as u64;
@@ -458,7 +534,7 @@ impl WebRtcTransport {
     ) -> Result<Option<CommandPacket>, TransportError> {
         loop {
             let frame = {
-                let mut guard = self.recv.lock().await;
+                let mut guard = self.inbox.lock().await;
                 match tokio::time::timeout(timeout, guard.recv()).await {
                     Ok(Some(frame)) => frame,
                     Ok(None) => return Ok(None),
@@ -507,6 +583,159 @@ impl WebRtcTransport {
             }
         }
     }
+
+    pub async fn close(self) {
+        if let Err(err) = self.channel.close().await {
+            log::warn!("[transport] failed to close WebRTC data channel: {err}");
+        }
+        if let Err(err) = self.peer.close().await {
+            log::warn!("[transport] failed to close WebRTC peer connection: {err}");
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn pair() -> Result<(Self, Self), TransportError> {
+        create_loopback_webrtc_pair().await
+    }
+}
+
+#[cfg(test)]
+fn build_webrtc_api() -> Result<API, TransportError> {
+    let mut media_engine = MediaEngine::default();
+
+    let mut registry = Registry::new();
+    registry = register_default_interceptors(registry, &mut media_engine)
+        .map_err(|err| TransportError::WebRtc(err.to_string()))?;
+
+    Ok(APIBuilder::new()
+        .with_media_engine(media_engine)
+        .with_interceptor_registry(registry)
+        .build())
+}
+
+#[cfg(test)]
+async fn create_loopback_webrtc_pair() -> Result<(WebRtcTransport, WebRtcTransport), TransportError>
+{
+    let api = build_webrtc_api()?;
+
+    let offer_pc = Arc::new(
+        api.new_peer_connection(RTCConfiguration::default())
+            .await
+            .map_err(|err| TransportError::WebRtc(err.to_string()))?,
+    );
+    let answer_pc = Arc::new(
+        api.new_peer_connection(RTCConfiguration::default())
+            .await
+            .map_err(|err| TransportError::WebRtc(err.to_string()))?,
+    );
+
+    let data_channel = offer_pc
+        .create_data_channel(
+            "theta-command",
+            Some(RTCDataChannelInit {
+                ordered: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await
+        .map_err(|err| TransportError::WebRtc(err.to_string()))?;
+
+    let (remote_dc_tx, remote_dc_rx) = oneshot::channel::<Arc<RTCDataChannel>>();
+    let remote_dc_sender = Arc::new(TokioMutex::new(Some(remote_dc_tx)));
+    answer_pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
+        let sender = remote_dc_sender.clone();
+        Box::pin(async move {
+            if let Some(tx) = sender.lock().await.take() {
+                let _ = tx.send(dc);
+            }
+        })
+    }));
+
+    forward_ice_candidates(&offer_pc, Arc::clone(&answer_pc));
+    forward_ice_candidates(&answer_pc, Arc::clone(&offer_pc));
+
+    let offer = offer_pc
+        .create_offer(None)
+        .await
+        .map_err(|err| TransportError::WebRtc(err.to_string()))?;
+    offer_pc
+        .set_local_description(offer)
+        .await
+        .map_err(|err| TransportError::WebRtc(err.to_string()))?;
+    let offer_desc = offer_pc
+        .local_description()
+        .await
+        .ok_or_else(|| TransportError::WebRtc("missing local offer description".into()))?;
+
+    answer_pc
+        .set_remote_description(offer_desc)
+        .await
+        .map_err(|err| TransportError::WebRtc(err.to_string()))?;
+
+    let answer = answer_pc
+        .create_answer(None)
+        .await
+        .map_err(|err| TransportError::WebRtc(err.to_string()))?;
+    answer_pc
+        .set_local_description(answer)
+        .await
+        .map_err(|err| TransportError::WebRtc(err.to_string()))?;
+    let answer_desc = answer_pc
+        .local_description()
+        .await
+        .ok_or_else(|| TransportError::WebRtc("missing local answer description".into()))?;
+
+    offer_pc
+        .set_remote_description(answer_desc)
+        .await
+        .map_err(|err| TransportError::WebRtc(err.to_string()))?;
+
+    let remote_channel = remote_dc_rx
+        .await
+        .map_err(|_| TransportError::WebRtc("data channel handshake failed".into()))?;
+
+    wait_for_channel_open(&data_channel).await;
+    wait_for_channel_open(&remote_channel).await;
+
+    let offer_transport = WebRtcTransport::from_parts(Arc::clone(&offer_pc), data_channel);
+    let answer_transport = WebRtcTransport::from_parts(answer_pc, remote_channel);
+
+    Ok((offer_transport, answer_transport))
+}
+
+#[cfg(test)]
+fn forward_ice_candidates(source: &Arc<RTCPeerConnection>, destination: Arc<RTCPeerConnection>) {
+    let (candidate_tx, mut candidate_rx) =
+        tokio::sync::mpsc::unbounded_channel::<RTCIceCandidateInit>();
+    source.on_ice_candidate(Box::new(move |candidate| {
+        let tx = candidate_tx.clone();
+        Box::pin(async move {
+            if let Some(candidate) = candidate {
+                if let Ok(json) = candidate.to_json() {
+                    let _ = tx.send(json);
+                }
+            }
+        })
+    }));
+
+    tokio::spawn(async move {
+        while let Some(candidate) = candidate_rx.recv().await {
+            if let Err(err) = destination.add_ice_candidate(candidate).await {
+                log::warn!("[webrtc] failed to add ICE candidate: {err}");
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+async fn wait_for_channel_open(channel: &Arc<RTCDataChannel>) {
+    for _ in 0..500 {
+        if channel.ready_state() == RTCDataChannelState::Open {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    log::warn!("[webrtc] data channel did not reach open state within expected window");
 }
 
 pub enum CommandTransport {

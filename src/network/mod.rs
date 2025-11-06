@@ -5,6 +5,9 @@ pub mod schema;
 #[cfg(feature = "network-quic")]
 pub mod transport;
 
+#[cfg(feature = "network-quic")]
+pub mod signaling;
+
 #[cfg(not(feature = "network-quic"))]
 pub mod transport {
     use super::TransportDiagnostics;
