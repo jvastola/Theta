@@ -1,17 +1,19 @@
 use std::collections::VecDeque;
+#[cfg(feature = "network-quic")]
+use std::convert::TryFrom;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "network-quic")]
 use audiopus::{
-    coder::{Decoder as OpusDecoder, Encoder as OpusEncoder},
     Application as OpusApplication,
     Channels as OpusChannels,
+    MutSignals,
+    SampleRate,
+    coder::{Decoder as OpusDecoder, Encoder as OpusEncoder},
+    packet::Packet,
 };
-
-#[cfg(feature = "network-quic")]
-const OPUS_SAMPLE_RATE_HZ: u32 = 48_000;
 
 #[cfg(feature = "network-quic")]
 const OPUS_FRAME_DURATION_MS: u32 = 20;
@@ -20,10 +22,13 @@ const OPUS_FRAME_DURATION_MS: u32 = 20;
 const OPUS_MAX_PACKET_SIZE: usize = 1_275;
 
 #[cfg(feature = "network-quic")]
-fn opus_channel_count(channels: OpusChannels) -> usize {
+fn opus_channel_count(channels: OpusChannels) -> Result<usize, VoiceCodecError> {
     match channels {
-        OpusChannels::Mono => 1,
-        OpusChannels::Stereo => 2,
+        OpusChannels::Mono => Ok(1),
+        OpusChannels::Stereo => Ok(2),
+        OpusChannels::Auto => Err(VoiceCodecError(
+            "Opus channel auto-detection is not supported".into(),
+        )),
     }
 }
 
@@ -71,7 +76,9 @@ impl VoiceCodec for PassthroughCodec {
 
     fn decode(&mut self, encoded: &[u8]) -> Result<Vec<i16>, VoiceCodecError> {
         if encoded.len() % 2 != 0 {
-            return Err(VoiceCodecError("encoded payload length must be even".into()));
+            return Err(VoiceCodecError(
+                "encoded payload length must be even".into(),
+            ));
         }
 
         let mut samples = Vec::with_capacity(encoded.len() / 2);
@@ -89,6 +96,7 @@ pub struct OpusCodec {
     encoder: OpusEncoder,
     decoder: OpusDecoder,
     channels: OpusChannels,
+    channel_count: usize,
     frame_samples_per_channel: usize,
     max_frame_samples: usize,
 }
@@ -96,17 +104,19 @@ pub struct OpusCodec {
 #[cfg(feature = "network-quic")]
 impl OpusCodec {
     pub fn new(channels: OpusChannels) -> Result<Self, VoiceCodecError> {
+        let channel_count = opus_channel_count(channels)?;
         let frame_samples_per_channel =
-            (OPUS_SAMPLE_RATE_HZ as usize * OPUS_FRAME_DURATION_MS as usize) / 1000;
-        let max_frame_samples = frame_samples_per_channel * opus_channel_count(channels);
+            (SampleRate::Hz48000 as usize * OPUS_FRAME_DURATION_MS as usize) / 1000;
+        let max_frame_samples = frame_samples_per_channel * channel_count;
 
-        let encoder = OpusEncoder::new(OPUS_SAMPLE_RATE_HZ, channels, OpusApplication::Voip)?;
-        let decoder = OpusDecoder::new(OPUS_SAMPLE_RATE_HZ, channels)?;
+        let encoder = OpusEncoder::new(SampleRate::Hz48000, channels, OpusApplication::Voip)?;
+        let decoder = OpusDecoder::new(SampleRate::Hz48000, channels)?;
 
         Ok(Self {
             encoder,
             decoder,
             channels,
+            channel_count,
             frame_samples_per_channel,
             max_frame_samples,
         })
@@ -138,24 +148,24 @@ impl VoiceCodec for OpusCodec {
         }
 
         let mut buffer = vec![0u8; OPUS_MAX_PACKET_SIZE];
-        let len = self
-            .encoder
-            .encode(pcm, self.frame_samples_per_channel, &mut buffer)?;
+        let len = self.encoder.encode(pcm, &mut buffer)?;
         buffer.truncate(len);
         Ok(buffer)
     }
 
     fn decode(&mut self, encoded: &[u8]) -> Result<Vec<i16>, VoiceCodecError> {
-        let samples = self
-            .decoder
-            .decode_vec(encoded, Some(self.frame_samples_per_channel))?;
-        if samples.len() != self.max_frame_samples {
+        let packet = Packet::try_from(encoded)?;
+        let mut samples = vec![0i16; self.max_frame_samples];
+        let signals = MutSignals::try_from(samples.as_mut_slice())?;
+        let decoded_per_channel = self.decoder.decode(Some(packet), signals, false)?;
+        if decoded_per_channel != self.frame_samples_per_channel {
             return Err(VoiceCodecError(format!(
-                "decoded {} samples, expected {}",
-                samples.len(),
-                self.max_frame_samples
+                "decoded {decoded_per_channel} samples per channel, expected {}",
+                self.frame_samples_per_channel
             )));
         }
+        let total_samples = decoded_per_channel * self.channel_count;
+        samples.truncate(total_samples);
         Ok(samples)
     }
 }
@@ -316,7 +326,7 @@ pub struct VoiceDiagnostics {
 
 #[derive(Clone, Default)]
 pub struct VoiceDiagnosticsHandle {
-    inner: Arc<Mutex<VoiceDiagnostics>>, 
+    inner: Arc<Mutex<VoiceDiagnostics>>,
 }
 
 impl VoiceDiagnosticsHandle {
@@ -411,7 +421,7 @@ mod tests {
 
     #[test]
     fn codec_roundtrip_preserves_samples() {
-    let mut codec = PassthroughCodec;
+        let mut codec = PassthroughCodec;
         let samples = vec![0, 1_000, -3_000, 12_345, -32_768, 32_767];
 
         let encoded = codec.encode(&samples).expect("encode samples");
@@ -480,11 +490,11 @@ mod tests {
 
     #[test]
     fn session_processes_packets_and_updates_metrics() {
-    let mut codec = PassthroughCodec;
+        let mut codec = PassthroughCodec;
         let samples = vec![1_500i16; 160];
         let payload = codec.encode(&samples).expect("encode samples");
 
-    let mut session = VoiceSession::new(PassthroughCodec, 4, 0.05);
+        let mut session = VoiceSession::new(PassthroughCodec, 4, 0.05);
         session.enqueue_packet(VoicePacket::new(1, 10, payload));
 
         let decoded = session

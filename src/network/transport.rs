@@ -1,4 +1,4 @@
-use super::{current_time_millis, TransportDiagnostics, TransportKind};
+use super::{TransportDiagnostics, TransportKind, current_time_millis};
 use crate::network::command_log::{CommandPacket, MAX_COMMAND_PACKET_BYTES};
 use crate::network::voice::{VoiceDiagnosticsHandle, VoicePacket};
 use crate::network::wire;
@@ -789,7 +789,11 @@ impl WebRtcTransport {
             m.voiced_frames = m.voiced_frames.saturating_add(1);
             let bits = m.bytes_sent as f32 * 8.0;
             m.bitrate_kbps = bits / 1000.0;
-            if !m.active_speakers.iter().any(|speaker| speaker == LOCAL_SPEAKER_TAG) {
+            if !m
+                .active_speakers
+                .iter()
+                .any(|speaker| speaker == LOCAL_SPEAKER_TAG)
+            {
                 m.active_speakers.push(LOCAL_SPEAKER_TAG.to_string());
             }
         });
@@ -884,7 +888,8 @@ impl WebRtcTransport {
             ));
         }
 
-        let payload = bytes[VOICE_FRAME_HEADER_BYTES..VOICE_FRAME_HEADER_BYTES + payload_len].to_vec();
+        let payload =
+            bytes[VOICE_FRAME_HEADER_BYTES..VOICE_FRAME_HEADER_BYTES + payload_len].to_vec();
         Ok(VoicePacket::new(sequence, timestamp_ms, payload))
     }
 
@@ -973,7 +978,7 @@ async fn create_loopback_webrtc_pair() -> Result<(WebRtcTransport, WebRtcTranspo
     answer_pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
         let waiters = remote_waiters.clone();
         Box::pin(async move {
-            let label = dc.label();
+            let label = dc.label().to_string();
             let mut waiters = waiters.lock().await;
             match label.as_str() {
                 "theta-command" => {
@@ -1044,13 +1049,13 @@ async fn create_loopback_webrtc_pair() -> Result<(WebRtcTransport, WebRtcTranspo
     wait_for_channel_open(&voice_channel).await;
     wait_for_channel_open(&remote_voice_channel).await;
 
-    let offer_transport = WebRtcTransport::from_parts(
-        Arc::clone(&offer_pc),
-        command_channel,
-        Some(voice_channel),
+    let offer_transport =
+        WebRtcTransport::from_parts(Arc::clone(&offer_pc), command_channel, Some(voice_channel));
+    let answer_transport = WebRtcTransport::from_parts(
+        answer_pc,
+        remote_command_channel,
+        Some(remote_voice_channel),
     );
-    let answer_transport =
-        WebRtcTransport::from_parts(answer_pc, remote_command_channel, Some(remote_voice_channel));
 
     Ok((offer_transport, answer_transport))
 }
