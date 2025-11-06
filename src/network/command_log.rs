@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Error as JsonError;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -257,6 +258,242 @@ pub enum CommandLogError {
     PacketDecodeFailed(String),
 }
 
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    pub burst: u32,
+    pub sustain_per_second: u32,
+    pub min_refill_interval: Duration,
+}
+
+impl RateLimitConfig {
+    pub fn new(burst: u32, sustain_per_second: u32, min_refill_interval: Duration) -> Self {
+        let safe_burst = burst.max(1);
+        let safe_interval = if min_refill_interval.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            min_refill_interval
+        };
+        Self {
+            burst: safe_burst,
+            sustain_per_second,
+            min_refill_interval: safe_interval,
+        }
+    }
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self::new(100, 10, Duration::from_millis(100))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandLogConfig {
+    pub rate_limit: RateLimitConfig,
+    #[cfg(feature = "command-log-persistence")]
+    pub persistence: ReplayPersistenceConfig,
+}
+
+impl CommandLogConfig {
+    pub fn security_defaults() -> Self {
+        Self::default()
+    }
+
+    pub fn with_rate_limit(rate_limit: RateLimitConfig) -> Self {
+        Self {
+            rate_limit,
+            #[cfg(feature = "command-log-persistence")]
+            persistence: ReplayPersistenceConfig::default(),
+        }
+    }
+}
+
+impl Default for CommandLogConfig {
+    fn default() -> Self {
+        Self {
+            rate_limit: RateLimitConfig::default(),
+            #[cfg(feature = "command-log-persistence")]
+            persistence: ReplayPersistenceConfig::default(),
+        }
+    }
+}
+
+#[cfg(feature = "command-log-persistence")]
+#[derive(Debug, Clone)]
+pub struct ReplayPersistenceConfig {
+    handle: Option<Arc<dyn ReplayPersistence>>,
+}
+
+#[cfg(feature = "command-log-persistence")]
+impl ReplayPersistenceConfig {
+    pub fn disabled() -> Self {
+        Self { handle: None }
+    }
+
+    pub fn with_handle(handle: Arc<dyn ReplayPersistence>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    pub fn handle(&self) -> Option<Arc<dyn ReplayPersistence>> {
+        self.handle.clone()
+    }
+}
+
+#[cfg(feature = "command-log-persistence")]
+impl Default for ReplayPersistenceConfig {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+#[cfg(feature = "command-log-persistence")]
+pub trait ReplayPersistence: Send + Sync {
+    fn load(&self, author: &AuthorId) -> Option<u64>;
+    fn store(&self, author: &AuthorId, nonce: u64);
+}
+
+#[allow(dead_code)]
+#[derive(Default)]
+struct ReplayTracker {
+    high_water: HashMap<AuthorId, u64>,
+    #[cfg(feature = "command-log-persistence")]
+    persistence: Option<Arc<dyn ReplayPersistence>>,
+}
+
+#[allow(dead_code)]
+impl ReplayTracker {
+    fn new() -> Self {
+        Self {
+            high_water: HashMap::new(),
+            #[cfg(feature = "command-log-persistence")]
+            persistence: None,
+        }
+    }
+
+    fn from_config(config: &CommandLogConfig) -> Self {
+        #[cfg(feature = "command-log-persistence")]
+        {
+            let mut tracker = Self::new();
+            tracker.persistence = config.persistence.handle();
+            tracker
+        }
+        #[cfg(not(feature = "command-log-persistence"))]
+        {
+            let _ = config;
+            Self::new()
+        }
+    }
+
+    fn high_water(&mut self, author: &AuthorId) -> Option<u64> {
+        if let Some(value) = self.high_water.get(author).copied() {
+            return Some(value);
+        }
+        #[cfg(feature = "command-log-persistence")]
+        if let Some(persistence) = self.persistence.as_ref() {
+            if let Some(stored) = persistence.load(author) {
+                self.high_water.insert(author.clone(), stored);
+                return Some(stored);
+            }
+        }
+        None
+    }
+
+    fn record(&mut self, author: &AuthorId, nonce: u64) {
+        let entry = self.high_water.entry(author.clone()).or_insert(0);
+        if nonce > *entry {
+            *entry = nonce;
+            #[cfg(feature = "command-log-persistence")]
+            if let Some(persistence) = self.persistence.as_ref() {
+                persistence.store(author, nonce);
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+struct RateLimiterMap {
+    buckets: HashMap<AuthorId, TokenBucket>,
+    config: RateLimitConfig,
+}
+
+#[allow(dead_code)]
+impl RateLimiterMap {
+    fn new(config: RateLimitConfig) -> Self {
+        Self {
+            buckets: HashMap::new(),
+            config,
+        }
+    }
+
+    fn take(&mut self, author: &AuthorId, amount: u32) -> bool {
+        self.take_at(author, amount, Instant::now())
+    }
+
+    fn take_at(&mut self, author: &AuthorId, amount: u32, now: Instant) -> bool {
+        let bucket = self
+            .buckets
+            .entry(author.clone())
+            .or_insert_with(|| TokenBucket::new(&self.config, now));
+        bucket.take(now, amount, &self.config)
+    }
+
+    #[cfg(test)]
+    fn tokens_for(&mut self, author: &AuthorId, now: Instant) -> f64 {
+        let bucket = self
+            .buckets
+            .entry(author.clone())
+            .or_insert_with(|| TokenBucket::new(&self.config, now));
+        bucket.refill(now, &self.config);
+        bucket.tokens
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+struct TokenBucket {
+    capacity: f64,
+    tokens: f64,
+    last_refill: Instant,
+}
+
+#[allow(dead_code)]
+impl TokenBucket {
+    fn new(config: &RateLimitConfig, now: Instant) -> Self {
+        let capacity = config.burst as f64;
+        Self {
+            capacity,
+            tokens: capacity,
+            last_refill: now,
+        }
+    }
+
+    fn refill(&mut self, now: Instant, config: &RateLimitConfig) {
+        if now <= self.last_refill {
+            return;
+        }
+        let elapsed = now.duration_since(self.last_refill);
+        if elapsed < config.min_refill_interval {
+            return;
+        }
+        let added = config.sustain_per_second as f64 * elapsed.as_secs_f64();
+        self.tokens = (self.tokens + added).min(self.capacity);
+        self.last_refill = now;
+    }
+
+    fn take(&mut self, now: Instant, amount: u32, config: &RateLimitConfig) -> bool {
+        self.refill(now, config);
+        let demand = amount as f64;
+        if self.tokens >= demand {
+            self.tokens = (self.tokens - demand).max(0.0);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct CommandRegistry {
     definitions: HashMap<String, CommandDefinition>,
@@ -284,21 +521,44 @@ pub struct CommandLog {
     latest_by_scope: HashMap<CommandScopeKey, CommandId>,
     registry: Arc<CommandRegistry>,
     verifier: Arc<dyn SignatureVerifier>,
+    #[allow(dead_code)]
+    config: CommandLogConfig,
+    #[allow(dead_code)]
+    replay_tracker: ReplayTracker,
+    #[allow(dead_code)]
+    rate_limiter: RateLimiterMap,
 }
 
 impl CommandLog {
     pub fn new(registry: Arc<CommandRegistry>, verifier: Arc<dyn SignatureVerifier>) -> Self {
+        Self::with_config(registry, verifier, CommandLogConfig::security_defaults())
+    }
+
+    pub fn with_config(
+        registry: Arc<CommandRegistry>,
+        verifier: Arc<dyn SignatureVerifier>,
+        config: CommandLogConfig,
+    ) -> Self {
+        let replay_tracker = ReplayTracker::from_config(&config);
+        let rate_limiter = RateLimiterMap::new(config.rate_limit.clone());
         Self {
             lamport_clock: 0,
             entries: BTreeMap::new(),
             latest_by_scope: HashMap::new(),
             registry,
             verifier,
+            config,
+            replay_tracker,
+            rate_limiter,
         }
     }
 
     pub fn set_verifier(&mut self, verifier: Arc<dyn SignatureVerifier>) {
         self.verifier = verifier;
+    }
+
+    pub fn config(&self) -> &CommandLogConfig {
+        &self.config
     }
 
     pub fn lamport(&self) -> u64 {
@@ -641,6 +901,7 @@ impl CommandSigner for Ed25519CommandSigner {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::time::{Duration, Instant};
 
     fn setup_registry() -> Arc<CommandRegistry> {
         let mut registry = CommandRegistry::new();
@@ -681,6 +942,44 @@ mod tests {
         fn sign(&self, _lamport: u64, _payload: &CommandPayload) -> Option<CommandSignature> {
             Some(CommandSignature(vec![0u8; 64]))
         }
+    }
+
+    #[test]
+    fn command_log_config_defaults_align_with_security_expectations() {
+        let defaults = CommandLogConfig::security_defaults();
+        assert_eq!(defaults.rate_limit.burst, 100);
+        assert_eq!(defaults.rate_limit.sustain_per_second, 10);
+        assert!(defaults.rate_limit.min_refill_interval >= Duration::from_millis(1));
+    }
+
+    #[test]
+    fn replay_tracker_tracks_high_water_mark() {
+        let config = CommandLogConfig::security_defaults();
+        let mut tracker = ReplayTracker::from_config(&config);
+        let author = AuthorId(11);
+
+        assert_eq!(tracker.high_water(&author), None);
+        tracker.record(&author, 5);
+        assert_eq!(tracker.high_water(&author), Some(5));
+        tracker.record(&author, 3);
+        assert_eq!(tracker.high_water(&author), Some(5));
+        tracker.record(&author, 7);
+        assert_eq!(tracker.high_water(&author), Some(7));
+    }
+
+    #[test]
+    fn rate_limiter_enforces_burst_and_refills() {
+        let config = RateLimitConfig::new(2, 200, Duration::from_millis(1));
+        let mut limiter = RateLimiterMap::new(config);
+        let author = AuthorId(99);
+        let now = Instant::now();
+
+        assert!(limiter.take_at(&author, 1, now));
+        assert!(limiter.take_at(&author, 1, now));
+        assert!(!limiter.take_at(&author, 1, now));
+
+        let later = now + Duration::from_millis(5);
+        assert!(limiter.take_at(&author, 1, later));
     }
 
     #[test]

@@ -10,6 +10,7 @@ vr-openxr = ["openxr"]
 physics-rapier = ["rapier3d"]
 target-pcvr = ["render-wgpu"]
 network-quic = ["quinn", "rustls", "tokio", "ed25519-dalek", "rand"]
+command-log-persistence = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
