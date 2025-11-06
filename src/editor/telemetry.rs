@@ -474,13 +474,15 @@ mod tests {
     #[test]
     fn telemetry_overlay_includes_transport_kind_and_metrics() {
         let mut overlay = TelemetryOverlay::default();
-        let mut metrics = TransportDiagnostics::default();
-        metrics.kind = TransportKind::WebRtc;
-        metrics.rtt_ms = 4.1;
-        metrics.jitter_ms = 0.16;
-        metrics.packets_sent = 32;
-        metrics.packets_received = 30;
-        metrics.compression_ratio = 1.0;
+        let metrics = TransportDiagnostics {
+            kind: TransportKind::WebRtc,
+            rtt_ms: 4.1,
+            jitter_ms: 0.16,
+            packets_sent: 32,
+            packets_received: 30,
+            compression_ratio: 1.0,
+            ..Default::default()
+        };
 
         let sample = static_sample(5).with_transport_metrics(Some(metrics));
 

@@ -6,9 +6,12 @@
 
 ### 📋 Project Overview
 - **[README](../README.md)** - Project introduction, current status, feature flags
+- **[Universal Development Plan](UNIVERSAL_DEVELOPMENT_PLAN.md)** - 🌟 **Date-agnostic master roadmap with multiplayer voice integration**
+- **[Edge Case Test Plan](EDGE_CASE_TEST_PLAN.md)** - 🧪 **Comprehensive test strategy for boundary conditions & adversarial scenarios**
+- **[Implementation Path Forward](IMPLEMENTATION_PATH_FORWARD.md)** - 🚀 **Milestone 2 kickoff plan: WebRTC + Voice implementation guide**
 - **[Status Overview](status_overview.md)** - Unified snapshot of phases, metrics, and active work
 - **[Architecture](architecture.md)** - High-level system design, subsystem overview, design decisions
-- **[Roadmap (November 2025)](roadmap_november_2025.md)** - Comprehensive development roadmap with sprint schedule
+- **[Roadmap (November 2025)](roadmap_november_2025.md)** - Time-bound development roadmap with sprint schedule
 - **[Completion Summary](COMPLETION_SUMMARY.md)** - Detailed summary of all completed work (Phases 1-4)
 
 ### 📊 Current Status
@@ -53,11 +56,14 @@
 - **[Network FlatBuffers Schema](../schemas/network.fbs)** - Network protocol message definitions
 
 ### 🔬 Testing & Quality
+- **[Edge Case Test Plan](EDGE_CASE_TEST_PLAN.md)** - 🧪 Comprehensive edge case, fuzz, and adversarial test strategy (target: 120+ tests)
 - **Test Coverage:** 74 tests (100% pass rate)
   - Unit tests: 68 (ECS, scheduler, command log, transport, telemetry, VR)
   - Integration tests: 6 (command pipeline, replication, telemetry)
 - Feature flag note: `cargo test --features network-quic` adds 12 transport-focused unit tests (86 total).
 - **CI Pipeline:** cargo fmt, clippy, tests, schema validation
+- **Fuzz Testing:** cargo-fuzz targets for command packets, FlatBuffers, Opus codec (10+ hours each)
+- **Coverage Tooling:** cargo-tarpaulin (≥80% line coverage target), cargo-mutants (≥60% mutation score)
 
 ### 🚀 Development Workflow
 
@@ -131,11 +137,15 @@ cargo test --features network-quic     # Run with networking
 ## Document Navigation Tips
 
 ### By Role:
-- **New Contributors:** Start with README → Architecture → Unified Status Overview
-- **Networking Engineers:** Network Protocol Schema Plan → Archived Phase 2/3 Reviews → Phase 4 Status
+- **New Contributors:** Start with README → Universal Development Plan → Architecture
+- **Active Developers:** Implementation Path Forward → Edge Case Test Plan → Architecture
+- **Strategic Planning:** Universal Development Plan → Edge Case Test Plan → Roadmap
+- **Networking Engineers:** Implementation Path Forward (Phase 1) → Network Protocol Schema Plan → Universal Development Plan (Milestone 2)
+- **Audio Engineers:** Implementation Path Forward (Phase 2) → Universal Development Plan (Voice sections) → Edge Case Test Plan (Voice tests)
 - **Graphics Engineers:** Architecture (Renderer section) → render/mod.rs
 - **VR Engineers:** Architecture (VR section) → vr/mod.rs → vr/openxr.rs
-- **Project Managers:** Roadmap → Completion Summary → Unified Status Overview
+- **QA Engineers:** Edge Case Test Plan → Implementation Path Forward (Phase 3) → Test files in tests/
+- **Project Managers:** Universal Development Plan → Implementation Path Forward → Roadmap
 
 ### By Topic:
 - **Understanding ECS:** Architecture → ecs/mod.rs → engine/schedule.rs
