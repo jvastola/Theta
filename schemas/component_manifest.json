@@ -1,6 +1,14 @@
 {
   "components": [
     {
+      "type_name": "theta_engine::editor::commands::CommandOutbox",
+      "stable_hash": 568020188763371146
+    },
+    {
+      "type_name": "theta_engine::editor::commands::CommandTransportQueue",
+      "stable_hash": 1346221161596777194
+    },
+    {
       "type_name": "theta_engine::editor::telemetry::TelemetryComponent",
       "stable_hash": 14389217213560918630
     },
@@ -15,6 +23,10 @@
     {
       "type_name": "theta_engine::engine::EditorSelection",
       "stable_hash": 2882055569926755522
+    },
+    {
+      "type_name": "theta_engine::engine::EditorToolState",
+      "stable_hash": 18143800476080352049
     },
     {
       "type_name": "theta_engine::engine::FrameStats",
