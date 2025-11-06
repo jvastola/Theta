@@ -130,13 +130,19 @@ impl CommandPipeline {
             .append_local(self.signer.as_ref(), payload, strategy);
 
         if let Err(err) = append_result {
-            if matches!(
-                err,
+            match err {
                 CommandLogError::ConflictRejected
-                    | CommandLogError::Duplicate
-                    | CommandLogError::InsufficientPermissions { .. }
-            ) {
-                self.metrics.record_conflict(strategy_hint);
+                | CommandLogError::Duplicate
+                | CommandLogError::InsufficientPermissions { .. } => {
+                    self.metrics.record_conflict(strategy_hint);
+                }
+                CommandLogError::RateLimited(_) => {
+                    self.metrics.record_rate_limit_drop();
+                }
+                CommandLogError::ReplayDetected(_) => {
+                    self.metrics.record_replay_rejection();
+                }
+                _ => {}
             }
             return Err(err);
         }
@@ -298,6 +304,22 @@ impl CommandPipeline {
                         entry.id
                     );
                 }
+                Err(CommandLogError::ReplayDetected(author)) => {
+                    self.metrics.record_replay_rejection();
+                    log::warn!(
+                        "[commands] remote command {:?} rejected as replay for author {:?}",
+                        entry.id,
+                        author
+                    );
+                }
+                Err(CommandLogError::RateLimited(author)) => {
+                    self.metrics.record_rate_limit_drop();
+                    log::warn!(
+                        "[commands] remote command {:?} exceeded rate limits for author {:?}",
+                        entry.id,
+                        author
+                    );
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -364,6 +386,8 @@ pub struct CommandMetricsSnapshot {
     pub conflict_rejections: std::collections::HashMap<ConflictStrategy, u64>,
     pub queue_depth: usize,
     pub signature_verify_latency_ms: f32,
+    pub replay_rejections: u64,
+    pub rate_limit_drops: u64,
 }
 
 #[derive(Default)]
@@ -374,6 +398,8 @@ struct CommandMetricsInternal {
     conflict_rejections: HashMap<ConflictStrategy, u64>,
     signature_verify_latency_ms: f32,
     queue_depth: usize,
+    replay_rejections: u64,
+    rate_limit_drops: u64,
 }
 
 impl CommandMetricsInternal {
@@ -400,6 +426,14 @@ impl CommandMetricsInternal {
         *entry = entry.saturating_add(1);
     }
 
+    fn record_replay_rejection(&mut self) {
+        self.replay_rejections = self.replay_rejections.saturating_add(1);
+    }
+
+    fn record_rate_limit_drop(&mut self) {
+        self.rate_limit_drops = self.rate_limit_drops.saturating_add(1);
+    }
+
     fn record_signature_latency(&mut self, latency_ms: f32) {
         if latency_ms <= 0.0 {
             return;
@@ -424,6 +458,8 @@ impl CommandMetricsInternal {
             conflict_rejections: self.conflict_rejections.clone(),
             queue_depth: self.queue_depth,
             signature_verify_latency_ms: self.signature_verify_latency_ms,
+            replay_rejections: self.replay_rejections,
+            rate_limit_drops: self.rate_limit_drops,
         }
     }
 }

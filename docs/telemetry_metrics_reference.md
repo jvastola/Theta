@@ -14,6 +14,8 @@ This reference describes the command telemetry fields emitted by the engine each
 | `conflict_rejections` | `HashMap<ConflictStrategy, u64>` | Per-strategy counters for conflicts, duplicates, or permission failures encountered locally or during remote integration. |
 | `queue_depth` | `usize` | Number of serialized `CommandPacket`s currently staged inside the `CommandTransportQueue`. Updated once per frame. |
 | `signature_verify_latency_ms` | `f32` | EWMA (α = 0.2) of Ed25519 verification latency recorded during remote packet integration. Reported in milliseconds. |
+| `replay_rejections` | `u64` | Count of commands dropped due to replay detection (nonce/lamport high-water check). Includes local and remote enforcement. |
+| `rate_limit_drops` | `u64` | Count of commands rejected by per-author token bucket limiter (local + remote). |
 
 ## Overlay Presentation
 
@@ -22,6 +24,7 @@ The telemetry overlay renders command metrics beneath transport statistics when 
 ```
 Commands rate  3.25/s total 42 queue 5 sig-lat  2.87 ms
   Conflicts LastWriteWins:1, Merge:2
+  Guards rate-limit 3 replay 1
 ```
 
 * Rate and queue depth thresholds:
@@ -36,6 +39,8 @@ Commands rate  3.25/s total 42 queue 5 sig-lat  2.87 ms
 | Queue depth | `Engine::update_frame_diagnostics` → `CommandTransportQueue::pending_depth` | Once per frame |
 | Signature latency | `CommandPipeline::integrate_remote_packet` | For every remote entry processed |
 | Conflict counters | `CommandPipeline::record_conflict` | On conflicts, duplicates, or permission failures |
+| Replay rejections | `CommandPipeline::record_replay_rejection` | On replay detection during local append or remote integration |
+| Rate-limit drops | `CommandPipeline::record_rate_limit_drop` | Whenever token bucket rejects a command |
 
 ## Alerting Guidelines
 
@@ -45,6 +50,8 @@ Commands rate  3.25/s total 42 queue 5 sig-lat  2.87 ms
 | `append_rate_per_sec > 20` sustained | Unusual command burst | Enable rate limiting (Phase 5) or investigate rogue tool |
 | `signature_verify_latency_ms > 15` | Potential crypto bottleneck | Profile verifier, consider batching verifications |
 | Any conflicts recorded with `Reject` | Data loss risk | Communicate to user; review in-flight editor actions |
+| `replay_rejections > 0` | Suspicious duplicates or clock skew | Inspect offending author, verify Lamport/nonce sync |
+| `rate_limit_drops > 10` / min | Command flood | Investigate offending tool/client; tune limiter thresholds |
 
 ## Future Enhancements
 

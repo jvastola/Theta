@@ -53,7 +53,7 @@
 - **[Network FlatBuffers Schema](../schemas/network.fbs)** - Network protocol message definitions
 
 ### 🔬 Testing & Quality
-- **Test Coverage:** 66 tests (100% pass rate)
+- **Test Coverage:** 71 tests (100% pass rate)
   - Unit tests: 53 (ECS, scheduler, command log, replication, etc.)
   - Integration tests: 6 (command pipeline, replication, telemetry)
 - **CI Pipeline:** cargo fmt, clippy, tests, schema validation

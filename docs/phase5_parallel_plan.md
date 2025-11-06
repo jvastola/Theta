@@ -5,7 +5,7 @@
 **Audience:** Networking, Systems, Editor, Platform/Infra teams
 
 ## Context
-- Phase 4 (Command Log & Conflict Resolution) is complete. Metrics, telemetry, and extended editor command vocabulary are merged and validated (66 tests passing).
+- Phase 4 (Command Log & Conflict Resolution) is complete. Metrics, telemetry, and extended editor command vocabulary are merged and validated (71 tests passing).
 - Phase 5 objectives focus on production hardening: securing the command pipeline, strengthening transports, adding performance instrumentation, and preparing documentation for broader team onboarding.
 - The roadmap accelerates into overlapping workstreams so that Networking/Security, Systems/Telemetry, Editor Tools, and Platform/Infra can execute in parallel while sharing common integration checkpoints.
 
@@ -32,6 +32,7 @@
 - [ ] Integrate token-bucket limiter (burst=100, sustain=10 commands/sec) with telemetry alerts and configurable thresholds.
 - [ ] Enforce 64 KB payload cap in transport receive; emit diagnostics and drop oversize packets.
 - [ ] Extend tests: replay rejection, limiter saturation, oversize payload handling.
+- [x] Introduce `CommandLogConfig` security defaults (rate limiter + replay tracker scaffolding) with unit coverage.
 
 #### Test Suite Enhancements (Networking & Security)
 - [ ] **Replay Protection:** Add unit and integration tests for nonce-based replay rejection, including edge cases (wraparound, duplicate, out-of-order nonces).

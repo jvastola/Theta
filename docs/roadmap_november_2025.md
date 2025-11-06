@@ -12,7 +12,7 @@
 
 ### Test Impact
 - Added 5 new tests (3 unit, 2 integration) covering transport round-trips, Lamport advancement, remote apply, and command serialization.
-- **Current total:** 66 tests passing (≥ Phase 4 exit criteria of 65).
+- **Current total:** 71 tests passing (≥ Phase 4 exit criteria of 65).
 
 ### Transition Notes
 - Phase 5 inherits security and resilience follow-ups: nonce-based replay protection, rate limiting, and Zstd compression.
@@ -337,7 +337,7 @@
 ## Success Metrics & KPIs
 
 ### Current Status (Phase 4):
-- ✅ 66 tests passing (5 new tests landed during Phase 4)
+- ✅ 71 tests passing (10 new tests landed across command and security suites)
 - ✅ Command packets broadcast and received over QUIC replication stream
 - ✅ Telemetry overlay surfaces command metrics (rate, conflicts, latency)
 - ✅ Loopback convergence validated with mixed local/remote command streams

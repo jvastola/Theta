@@ -256,6 +256,10 @@ pub enum CommandLogError {
     Duplicate,
     #[error("failed to decode command packet: {0}")]
     PacketDecodeFailed(String),
+    #[error("command replay detected for author {0:?}")]
+    ReplayDetected(AuthorId),
+    #[error("rate limited command for author {0:?}")]
+    RateLimited(AuthorId),
 }
 
 #[derive(Debug, Clone)]
@@ -400,15 +404,43 @@ impl ReplayTracker {
         None
     }
 
-    fn record(&mut self, author: &AuthorId, nonce: u64) {
-        let entry = self.high_water.entry(author.clone()).or_insert(0);
-        if nonce > *entry {
-            *entry = nonce;
-            #[cfg(feature = "command-log-persistence")]
-            if let Some(persistence) = self.persistence.as_ref() {
-                persistence.store(author, nonce);
+    fn accept_remote(&mut self, author: &AuthorId, nonce: u64) -> bool {
+        match self.high_water(author) {
+            Some(previous) => {
+                if Self::is_newer(previous, nonce) {
+                    self.store_high_water(author, nonce);
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                self.store_high_water(author, nonce);
+                true
             }
         }
+    }
+
+    fn record_local(&mut self, author: &AuthorId, nonce: u64) {
+        self.store_high_water(author, nonce);
+    }
+
+    fn store_high_water(&mut self, author: &AuthorId, nonce: u64) {
+        self.high_water.insert(author.clone(), nonce);
+        #[cfg(feature = "command-log-persistence")]
+        if let Some(persistence) = self.persistence.as_ref() {
+            persistence.store(author, nonce);
+        }
+    }
+
+    fn is_newer(previous: u64, candidate: u64) -> bool {
+        if candidate == previous {
+            return false;
+        }
+        if previous == u64::MAX && candidate == 0 {
+            return true;
+        }
+        candidate > previous
     }
 }
 
@@ -596,6 +628,10 @@ impl CommandLog {
             payload.scope = CommandScope::Global;
         }
 
+        if !self.rate_limiter.take(&author.id, 1) {
+            return Err(CommandLogError::RateLimited(author.id.clone()));
+        }
+
         let lamport = self.next_lamport();
         let id = CommandId::new(lamport, author.id.clone());
         let signature = signer.sign(lamport, &payload);
@@ -615,7 +651,14 @@ impl CommandLog {
             signature,
         );
 
-        self.integrate_entry(entry, true).map(|_| id)
+        match self.integrate_entry(entry, true) {
+            Ok(true) => {
+                self.replay_tracker.record_local(&author.id, lamport);
+                Ok(id)
+            }
+            Ok(false) => Ok(id),
+            Err(err) => Err(err),
+        }
     }
 
     pub fn integrate_remote(&mut self, entry: CommandEntry) -> Result<bool, CommandLogError> {
@@ -645,6 +688,21 @@ impl CommandLog {
             {
                 return Err(CommandLogError::InvalidSignature(entry.author.id.clone()));
             }
+        }
+
+        if self.entries.contains_key(&entry.id) {
+            return Ok(false);
+        }
+
+        if !self.rate_limiter.take(&entry.author.id, 1) {
+            return Err(CommandLogError::RateLimited(entry.author.id.clone()));
+        }
+
+        if !self
+            .replay_tracker
+            .accept_remote(&entry.author.id, entry.id.lamport())
+        {
+            return Err(CommandLogError::ReplayDetected(entry.author.id.clone()));
         }
 
         self.integrate_entry(entry, false)
@@ -959,12 +1017,14 @@ mod tests {
         let author = AuthorId(11);
 
         assert_eq!(tracker.high_water(&author), None);
-        tracker.record(&author, 5);
+        tracker.record_local(&author, 5);
         assert_eq!(tracker.high_water(&author), Some(5));
-        tracker.record(&author, 3);
-        assert_eq!(tracker.high_water(&author), Some(5));
-        tracker.record(&author, 7);
-        assert_eq!(tracker.high_water(&author), Some(7));
+        assert!(!tracker.accept_remote(&author, 4));
+        assert!(tracker.accept_remote(&author, 6));
+        assert_eq!(tracker.high_water(&author), Some(6));
+        tracker.record_local(&author, u64::MAX);
+        assert!(tracker.accept_remote(&author, 0));
+        assert_eq!(tracker.high_water(&author), Some(0));
     }
 
     #[test]
@@ -980,6 +1040,61 @@ mod tests {
 
         let later = now + Duration::from_millis(5);
         assert!(limiter.take_at(&author, 1, later));
+    }
+
+    #[test]
+    fn append_local_respects_rate_limiter() {
+        let registry = setup_registry();
+        let verifier = Arc::new(NoopSignatureVerifier::default()) as Arc<dyn SignatureVerifier>;
+        let config =
+            CommandLogConfig::with_rate_limit(RateLimitConfig::new(1, 0, Duration::from_secs(1)));
+        let mut log = CommandLog::with_config(Arc::clone(&registry), verifier, config);
+
+        let editor = CommandAuthor::new(AuthorId(21), CommandRole::Editor);
+        let signer = NoopCommandSigner::new(editor);
+
+        let payload = CommandPayload::new("editor.selection", CommandScope::Global, vec![1]);
+        log.append_local(&signer, payload, None)
+            .expect("first append succeeds");
+
+        let payload_second = CommandPayload::new("editor.selection", CommandScope::Global, vec![2]);
+        let err = log
+            .append_local(&signer, payload_second, None)
+            .expect_err("second append should rate limit");
+        assert!(matches!(err, CommandLogError::RateLimited(AuthorId(21))));
+    }
+
+    #[test]
+    fn integrate_remote_rejects_stale_entries() {
+        let registry = setup_registry();
+        let verifier = Arc::new(NoopSignatureVerifier::default()) as Arc<dyn SignatureVerifier>;
+        let mut source = CommandLog::new(Arc::clone(&registry), Arc::clone(&verifier));
+        let mut sink = CommandLog::new(Arc::clone(&registry), verifier);
+
+        let author = CommandAuthor::new(AuthorId(31), CommandRole::Editor);
+        let signer = FakeSignatureSigner::new(author.clone());
+
+        let payload = CommandPayload::new("editor.create", CommandScope::Global, vec![9]);
+        source
+            .append_local(&signer, payload, Some(ConflictStrategy::Merge))
+            .expect("append");
+
+        let entry = source.entries().next().expect("entry").clone();
+        assert!(sink.integrate_remote(entry.clone()).expect("first ok"));
+
+        let stale_entry = CommandEntry::new(
+            CommandId::new(entry.id.lamport() - 1, author.id.clone()),
+            entry.timestamp_ms,
+            entry.payload.clone(),
+            entry.strategy,
+            author,
+            entry.signature.clone(),
+        );
+
+        let err = sink
+            .integrate_remote(stale_entry)
+            .expect_err("stale entry rejected");
+        assert!(matches!(err, CommandLogError::ReplayDetected(AuthorId(31))));
     }
 
     #[test]
