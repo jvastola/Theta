@@ -15,7 +15,9 @@ use crate::editor::{CommandOutbox, CommandTransportQueue};
 use crate::network::EntityHandle;
 use crate::network::command_log::{CommandBatch, CommandEntry, CommandPacket, CommandScope};
 #[cfg(feature = "network-quic")]
-use crate::network::transport::{CommandTransport, TransportError, TransportSession};
+use crate::network::transport::{
+    CommandTransport, TransportError, TransportSession, WebRtcTransport,
+};
 use crate::render::{BackendKind, GpuBackend, NullGpuBackend, Renderer, RendererConfig};
 #[cfg(feature = "vr-openxr")]
 use crate::vr::openxr::OpenXrInputProvider;
@@ -113,6 +115,11 @@ impl Engine {
     #[cfg(feature = "network-quic")]
     pub fn attach_transport_session(&mut self, session: TransportSession) {
         self.attach_command_transport(CommandTransport::from(session));
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn attach_webrtc_transport(&mut self, transport: WebRtcTransport) {
+        self.attach_command_transport(CommandTransport::from(transport));
     }
 
     pub fn add_system<S>(&mut self, stage: Stage, name: &'static str, system: S)

@@ -49,8 +49,18 @@ use serde::{Deserialize, Serialize};
 use std::any::TypeId;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub enum TransportKind {
+    #[default]
+    Unknown,
+    Quic,
+    WebRtc,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct TransportDiagnostics {
+    #[serde(default)]
+    pub kind: TransportKind,
     pub rtt_ms: f32,
     pub jitter_ms: f32,
     pub packets_sent: u64,

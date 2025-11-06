@@ -19,7 +19,7 @@
 
 | Workstream | Team | Scope | Dependencies | Sprint Deliverables |
 |------------|------|-------|--------------|---------------------|
-| **Security & Integrity** | Networking & Security | Nonce replay protection, per-author rate limiting, payload size guards, signature rejection telemetry | Phase 4 command pipeline, QUIC transport | `CommandPacket` nonce field + verifier, rate limiter with configurable thresholds, 64 KB guard w/ tests, telemetry warnings |
+| **Security & Integrity** | Networking & Security | Nonce replay protection, per-author rate limiting, payload size guards, signature rejection telemetry | Phase 4 command pipeline, QUIC transport | `CommandPacket` nonce field + verifier ✅, rate limiter with configurable thresholds ✅, 64 KiB guard + telemetry ✅ |
 | **Transport Resilience** | Networking & Security + Platform | WebRTC data-channel fallback, multi-protocol convergence suite, soak test harness | Security workstream for shared metrics; CI infra | Browser peer prototype, convergence test covering QUIC/WebRTC, nightly soak task in CI |
 | **Compression & Benchmarking** | Systems & Telemetry | Zstd compression for commands, telemetry export to CSV/Parquet, nightly perf benchmarks | Security (payload guard) to finalize envelope | Compression toggle w/ metrics, benchmark harness w/ baseline report, telemetry artifact publishing |
 | **Editor Protocol & Tooling** | Editor Tools | Publish command protocol schema, update tool docs, plan Phase 6 mesh data flow | Phase 4 command vocab, Systems telemetry fields | `editor_command_schema.json` + Markdown spec, PolySketch tool matrix, mesh command backlog grooming |
@@ -28,9 +28,9 @@
 ## Cross-Team To-Do List
 
 ### Networking & Security
-- [ ] Add `nonce: u64` to `CommandPacket`; persist high-water mark per author; reject stale values.
-- [ ] Integrate token-bucket limiter (burst=100, sustain=10 commands/sec) with telemetry alerts and configurable thresholds.
-- [ ] Enforce 64 KB payload cap in transport receive; emit diagnostics and drop oversize packets.
+- [x] Add `nonce: u64` to `CommandPacket`; persist high-water mark per author; reject stale values.
+- [x] Integrate token-bucket limiter (burst=100, sustain=10 commands/sec) with telemetry alerts and configurable thresholds.
+- [x] Enforce 64 KiB payload cap in transport receive; emit diagnostics and drop oversize packets.
 - [ ] Extend tests: replay rejection, limiter saturation, oversize payload handling.
 - [x] Introduce `CommandLogConfig` security defaults (rate limiter + replay tracker scaffolding) with unit coverage.
 

@@ -11,9 +11,9 @@
 | Phase 2 | QUIC Transport & Handshake | ✅ Complete | QUIC streams, capability negotiation, heartbeat diagnostics |
 | Phase 3 | ECS Replication Pipeline | ✅ Complete | Snapshot chunking, delta tracker, registry-driven serialization |
 | Phase 4 | Command Log & Conflict Resolution | ✅ Complete | Lamport-ordered command log, signed command pipeline, QUIC command transport, telemetry metrics |
-| Phase 5 | Production Hardening | 🚧 Kickoff | Security hardening, WebRTC fallback, compression, interest management |
+| Phase 5 | Production Hardening | 🚧 In Flight | Security hardening, WebRTC fallback, compression, interest management |
 
-**Test Coverage:** 71 tests passing (65 unit + 6 integration)  
+**Test Coverage:** 73 tests passing (67 unit + 6 integration)  
 **Build Status:** `cargo build` and `cargo test` (with `network-quic`) passing  
 **Feature Flags:** `render-wgpu`, `vr-openxr`, `network-quic` validated in CI
 
@@ -27,15 +27,15 @@
 - 5 new tests landed (3 unit, 2 integration) covering transport round-trips, Lamport advancement, remote apply, and mesh command serialization.
 
 ### Phase 5 Kickoff (Production Hardening)
-- **Security Hardening:** `CommandLogConfig` now ships with rate limiting and replay tracking defaults; next steps wire payload guards, persistence backing, and telemetry alerts into the enforcement path.
-- **Transport Resilience:** WebRTC data-channel prototype with QUIC/WebRTC convergence testing, signalling hardening, TURN/STUN coverage.
+- **Security Hardening:** Nonce-based replay protection, token-bucket rate limiting, and 64 KiB payload guards are live with telemetry counters (`replay_rejections`, `rate_limit_drops`, `payload_guard_drops`). Persistence backing remains on the roadmap.
+- **Transport Resilience:** QUIC remains the primary path while the WebRTC fallback now carries command packets over an async data-channel bridge with shared metrics plumbing. Convergence and TURN/STUN hardening are the next milestones.
 - **Compression & Interest Management:** Zstd dictionary integration for command/replication payloads, spatial interest filters, nightly bandwidth benchmarks.
 - **Documentation & Protocol:** Editor command schema publication, operator runbook updates, telemetry export guides.
 - Reference plan: `docs/phase5_parallel_plan.md` (parallel work streams and owners).
 
 ## Metrics & Telemetry
-- **Tests:** 66 passing (no failures, no ignored). Integration suites cover replication, command pipeline, telemetry, and transport loopback.
-- **Performance Instrumentation:** Command metrics now included in `TransportDiagnostics` and overlay text panels; replication metrics captured for snapshot/delta size tracking.
+- **Tests:** 73 passing (no failures, no ignored). Integration suites cover replication, command pipeline, telemetry, and transport loopback.
+- **Performance Instrumentation:** Command metrics now include payload guard drops; transport diagnostics tag the active transport (`Quic` or `WebRtc`) and surface in the overlay for operator awareness.
 - **Codebase Footprint:** ~8,500 source LOC + ~2,700 test LOC (per `COMPLETION_SUMMARY.md`).
 
 ## Risks & Mitigations

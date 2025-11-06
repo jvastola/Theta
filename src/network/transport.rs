@@ -1,4 +1,4 @@
-use super::{TransportDiagnostics, current_time_millis};
+use super::{TransportDiagnostics, TransportKind, current_time_millis};
 use crate::network::command_log::{CommandPacket, MAX_COMMAND_PACKET_BYTES};
 use crate::network::wire;
 use ed25519_dalek::SigningKey;
@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 #[cfg(not(has_generated_network_schema))]
@@ -27,12 +28,6 @@ const FRAME_HEADER_LEN: usize = 4;
 const HANDSHAKE_CAPACITY: usize = 1024;
 const FRAME_KIND_COMMAND_PACKET: u8 = 1;
 const FRAME_KIND_COMPONENT_DELTA: u8 = 2;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportKind {
-    Quic,
-    WebRtc,
-}
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -60,6 +55,64 @@ pub enum TransportError {
     ReadToEnd(#[from] ReadToEndError),
     #[error("transport unsupported: {0}")]
     Unsupported(&'static str),
+}
+
+#[cfg(test)]
+mod webrtc_tests {
+    use super::*;
+    use crate::network::command_log::{
+        AuthorId, CommandAuthor, CommandBatch, CommandEntry, CommandId, CommandPayload,
+        CommandRole, CommandScope, ConflictStrategy,
+    };
+
+    #[tokio::test]
+    async fn webrtc_transport_transfers_command_packets() {
+        let (sender, receiver) = WebRtcTransport::pair();
+
+        let author = CommandAuthor::new(AuthorId(9), CommandRole::Editor);
+        let payload = CommandPayload::new("transport.test", CommandScope::Global, vec![1, 2, 3]);
+        let entry = CommandEntry::new(
+            CommandId::new(1, AuthorId(9)),
+            99,
+            payload,
+            ConflictStrategy::LastWriteWins,
+            author,
+            None,
+        );
+        let batch = CommandBatch {
+            sequence: 7,
+            nonce: 11,
+            timestamp_ms: 5_000,
+            author: AuthorId(9),
+            entries: vec![entry],
+        };
+        let packet = CommandPacket::from_batch(&batch).expect("serialize command batch");
+
+        let send_packet = packet.clone();
+        let send_task = tokio::spawn(async move {
+            sender
+                .send_command_packets(std::slice::from_ref(&send_packet))
+                .await
+                .expect("send over WebRTC");
+            sender.close().await;
+        });
+
+        let metrics_handle = receiver.metrics_handle();
+        let received = receiver
+            .receive_command_packet(Duration::from_millis(100))
+            .await
+            .expect("receive command packet")
+            .expect("packet present");
+        assert_eq!(received.sequence, packet.sequence);
+        assert_eq!(received.nonce, packet.nonce);
+
+        let metrics = metrics_handle.latest().expect("metrics available");
+        assert_eq!(metrics.kind, TransportKind::WebRtc);
+        assert_eq!(metrics.command_packets_received, 1);
+
+        receiver.close().await;
+        send_task.await.expect("sender task completes");
+    }
 }
 
 struct FramedStream {
@@ -238,6 +291,7 @@ impl TransportSession {
         let sent = packets.len() as u64;
         let elapsed = send_start.elapsed().as_secs_f32();
         self.metrics.update(|m| {
+            m.kind = TransportKind::Quic;
             m.packets_sent = m.packets_sent.saturating_add(sent);
             m.command_packets_sent = m.command_packets_sent.saturating_add(sent);
             if sent > 0 {
@@ -281,6 +335,7 @@ impl TransportSession {
                     let latency_ms =
                         (current_time_millis().saturating_sub(packet.timestamp_ms)) as f32;
                     self.metrics.update(|m| {
+                        m.kind = TransportKind::Quic;
                         m.packets_received = m.packets_received.saturating_add(1);
                         m.command_packets_received = m.command_packets_received.saturating_add(1);
                         m.compression_ratio = 1.0;
@@ -314,19 +369,30 @@ impl TransportSession {
     }
 }
 
-#[derive(Debug, Default)]
 pub struct WebRtcTransport {
+    send: UnboundedSender<Vec<u8>>,
+    recv: Arc<TokioMutex<UnboundedReceiver<Vec<u8>>>>,
     metrics: TransportMetricsHandle,
 }
 
 impl WebRtcTransport {
-    pub fn new() -> Self {
+    pub fn new(send: UnboundedSender<Vec<u8>>, recv: UnboundedReceiver<Vec<u8>>) -> Self {
+        let metrics = TransportMetricsHandle::new();
+        metrics.update(|m| {
+            m.kind = TransportKind::WebRtc;
+            if m.compression_ratio == 0.0 {
+                m.compression_ratio = 1.0;
+            }
+        });
         Self {
-            metrics: TransportMetricsHandle::new(),
+            send,
+            recv: Arc::new(TokioMutex::new(recv)),
+            metrics,
         }
     }
 
     pub fn metrics_handle(&self) -> TransportMetricsHandle {
+        self.metrics.update(|m| m.kind = TransportKind::WebRtc);
         self.metrics.clone()
     }
 
@@ -334,22 +400,112 @@ impl WebRtcTransport {
         TransportKind::WebRtc
     }
 
+    pub fn pair() -> (Self, Self) {
+        let (a_tx, a_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, b_rx) = tokio::sync::mpsc::unbounded_channel();
+        (Self::new(a_tx, b_rx), Self::new(b_tx, a_rx))
+    }
+
+    pub async fn close(self) {
+        // Dropping the sender notifies the remote peer that the channel is closed.
+        drop(self);
+    }
+
     pub async fn send_command_packets(
         &self,
-        _packets: &[CommandPacket],
+        packets: &[CommandPacket],
     ) -> Result<(), TransportError> {
-        Err(TransportError::Unsupported(
-            "WebRTC command transport not yet implemented",
-        ))
+        if packets.is_empty() {
+            return Ok(());
+        }
+
+        let send_start = Instant::now();
+        let mut total_bytes = 0usize;
+        for packet in packets {
+            let frame = encode_command_packet_frame(packet)?;
+            total_bytes = total_bytes.saturating_add(frame.len());
+            self.send
+                .send(frame)
+                .map_err(|_| TransportError::Protocol("WebRTC data channel closed".into()))?;
+        }
+
+        let sent = packets.len() as u64;
+        let elapsed = send_start.elapsed().as_secs_f32();
+        self.metrics.update(|m| {
+            m.kind = TransportKind::WebRtc;
+            m.packets_sent = m.packets_sent.saturating_add(sent);
+            m.command_packets_sent = m.command_packets_sent.saturating_add(sent);
+            if sent > 0 {
+                m.compression_ratio = m.compression_ratio.max(1.0);
+            }
+            if total_bytes > 0 {
+                let bandwidth = if elapsed > 0.0 {
+                    total_bytes as f32 / elapsed
+                } else {
+                    total_bytes as f32
+                };
+                m.command_bandwidth_bytes_per_sec = bandwidth;
+                m.command_latency_ms = elapsed * 1000.0;
+            }
+        });
+
+        Ok(())
     }
 
     pub async fn receive_command_packet(
         &self,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<Option<CommandPacket>, TransportError> {
-        Err(TransportError::Unsupported(
-            "WebRTC command transport not yet implemented",
-        ))
+        loop {
+            let frame = {
+                let mut guard = self.recv.lock().await;
+                match tokio::time::timeout(timeout, guard.recv()).await {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => return Ok(None),
+                    Err(_) => return Ok(None),
+                }
+            };
+
+            match decode_replication_frame(&frame) {
+                Ok(DecodedReplicationFrame::Command(packet)) => {
+                    if packet.payload.len() > MAX_COMMAND_PACKET_BYTES {
+                        log::warn!(
+                            "[transport] dropping oversized command packet {} ({} bytes) via WebRTC",
+                            packet.sequence,
+                            packet.payload.len()
+                        );
+                        continue;
+                    }
+                    let latency_ms =
+                        (current_time_millis().saturating_sub(packet.timestamp_ms)) as f32;
+                    self.metrics.update(|m| {
+                        m.kind = TransportKind::WebRtc;
+                        m.packets_received = m.packets_received.saturating_add(1);
+                        m.command_packets_received = m.command_packets_received.saturating_add(1);
+                        m.compression_ratio = m.compression_ratio.max(1.0);
+                        m.command_bandwidth_bytes_per_sec = frame.len() as f32;
+                        m.command_latency_ms = latency_ms;
+                    });
+                    return Ok(Some(packet));
+                }
+                Ok(DecodedReplicationFrame::ComponentDelta(bytes)) => {
+                    log::debug!(
+                        "[transport] received component delta over WebRTC ({} bytes) while awaiting command",
+                        bytes.len()
+                    );
+                    continue;
+                }
+                Ok(DecodedReplicationFrame::Unknown(kind, payload)) => {
+                    log::warn!(
+                        "[transport] ignoring unknown WebRTC frame kind {} ({} bytes)",
+                        kind,
+                        payload.len()
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 }
 
@@ -396,9 +552,7 @@ impl CommandTransport {
     pub async fn close(self) {
         match self {
             CommandTransport::Quic(session) => session.close().await,
-            CommandTransport::WebRtc(_) => {
-                // Nothing to close yet for the stub transport.
-            }
+            CommandTransport::WebRtc(transport) => transport.close().await,
         }
     }
 }
@@ -406,6 +560,12 @@ impl CommandTransport {
 impl From<TransportSession> for CommandTransport {
     fn from(value: TransportSession) -> Self {
         CommandTransport::Quic(value)
+    }
+}
+
+impl From<WebRtcTransport> for CommandTransport {
+    fn from(value: WebRtcTransport) -> Self {
+        CommandTransport::WebRtc(value)
     }
 }
 
@@ -470,6 +630,7 @@ async fn establish_client_session(
 
     let metrics = TransportMetricsHandle::new();
     metrics.update(|m| {
+        m.kind = TransportKind::Quic;
         m.packets_sent = m.packets_sent.saturating_add(1);
         m.packets_received = m.packets_received.saturating_add(1);
         m.compression_ratio = 1.0;
@@ -540,6 +701,7 @@ async fn establish_server_session(
 
     let metrics = TransportMetricsHandle::new();
     metrics.update(|m| {
+        m.kind = TransportKind::Quic;
         m.packets_received = m.packets_received.saturating_add(1);
         m.compression_ratio = 1.0;
     });
@@ -860,6 +1022,7 @@ impl HeartbeatActor {
                     break;
                 }
                 send_handle_metrics.update(|m| {
+                    m.kind = TransportKind::Quic;
                     m.packets_sent = m.packets_sent.saturating_add(1);
                     m.compression_ratio = 1.0;
                 });
@@ -889,6 +1052,7 @@ impl HeartbeatActor {
                                 0.0
                             };
                             recv_handle_metrics.update(|m| {
+                                m.kind = TransportKind::Quic;
                                 let prev = m.rtt_ms;
                                 m.rtt_ms = diff;
                                 m.jitter_ms = (diff - prev).abs();
@@ -1395,7 +1559,6 @@ mod tests {
         assert!(metrics1.packets_received > 0);
 
         client1_session.close().await;
-
         let client2_session = connect(
             &client_endpoint2,
             server_addr,

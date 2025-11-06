@@ -226,7 +226,8 @@ impl TelemetryOverlay {
 
         if let Some(metrics) = &latest.transport {
             lines.push(format!(
-                "  Network  RTT {:>6.2} ms jitter {:>6.2} ms packets {}/{} ratio {:.2}",
+                "  Network  kind {:?} RTT {:>6.2} ms jitter {:>6.2} ms packets {}/{} ratio {:.2}",
+                metrics.kind,
                 metrics.rtt_ms,
                 metrics.jitter_ms,
                 metrics.packets_sent,
