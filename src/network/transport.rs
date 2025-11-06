@@ -1,5 +1,5 @@
 use super::{TransportDiagnostics, current_time_millis};
-use crate::network::command_log::CommandPacket;
+use crate::network::command_log::{CommandPacket, MAX_COMMAND_PACKET_BYTES};
 use crate::network::wire;
 use ed25519_dalek::SigningKey;
 use flatbuffers::{FlatBufferBuilder, UnionWIPOffset, WIPOffset};
@@ -259,6 +259,14 @@ impl TransportSession {
 
             match decode_replication_frame(&frame) {
                 Ok(DecodedReplicationFrame::Command(packet)) => {
+                    if packet.payload.len() > MAX_COMMAND_PACKET_BYTES {
+                        log::warn!(
+                            "[transport] dropping oversized command packet {} ({} bytes)",
+                            packet.sequence,
+                            packet.payload.len()
+                        );
+                        continue;
+                    }
                     let latency_ms =
                         (current_time_millis().saturating_sub(packet.timestamp_ms)) as f32;
                     self.metrics.update(|m| {
@@ -1482,7 +1490,9 @@ mod tests {
         );
         let batch = CommandBatch {
             sequence: 42,
+            nonce: 9,
             timestamp_ms: 5_678,
+            author: AuthorId(7),
             entries: vec![entry],
         };
         let packet = CommandPacket::from_batch(&batch).expect("serialize command batch");

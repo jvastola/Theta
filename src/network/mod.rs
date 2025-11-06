@@ -44,7 +44,7 @@ pub mod wire {
 }
 
 use crate::ecs::Entity;
-use crate::network::command_log::{CommandBatch, CommandEntry};
+use crate::network::command_log::{AuthorId, CommandBatch, CommandEntry};
 use serde::{Deserialize, Serialize};
 use std::any::TypeId;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -177,6 +177,7 @@ impl ChangeSet {
 
 pub struct NetworkSession {
     sequence: u64,
+    command_nonce: u64,
     advertised_components: Vec<ComponentDescriptor>,
     transport_metrics: Option<transport::TransportMetricsHandle>,
 }
@@ -185,6 +186,7 @@ impl NetworkSession {
     pub fn new() -> Self {
         Self {
             sequence: 0,
+            command_nonce: 0,
             advertised_components: Vec::new(),
             transport_metrics: None,
         }
@@ -197,6 +199,7 @@ impl NetworkSession {
     pub fn with_transport_metrics(handle: transport::TransportMetricsHandle) -> Self {
         Self {
             sequence: 0,
+            command_nonce: 0,
             advertised_components: Vec::new(),
             transport_metrics: Some(handle),
         }
@@ -236,9 +239,23 @@ impl NetworkSession {
     }
 
     pub fn craft_command_batch(&mut self, entries: Vec<CommandEntry>) -> CommandBatch {
+        debug_assert!(
+            !entries.is_empty(),
+            "command batch requires at least one entry"
+        );
+        let sequence = self.next_sequence();
+        let timestamp_ms = current_time_millis();
+        let nonce = self.next_command_nonce();
+        let author = entries
+            .first()
+            .map(|entry| entry.author.id.clone())
+            .unwrap_or(AuthorId(0));
+
         CommandBatch {
-            sequence: self.next_sequence(),
-            timestamp_ms: current_time_millis(),
+            sequence,
+            nonce,
+            timestamp_ms,
+            author,
             entries,
         }
     }
@@ -247,6 +264,13 @@ impl NetworkSession {
 impl Default for NetworkSession {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl NetworkSession {
+    fn next_command_nonce(&mut self) -> u64 {
+        self.command_nonce = self.command_nonce.wrapping_add(1);
+        self.command_nonce
     }
 }
 

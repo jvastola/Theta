@@ -8,7 +8,8 @@ use crate::editor::commands::{
 use crate::network::command_log::{
     AuthorId, CommandAuthor, CommandDefinition, CommandEntry, CommandId, CommandLog,
     CommandLogError, CommandPacket, CommandPayload, CommandRegistry, CommandRole, CommandScope,
-    CommandSigner, ConflictStrategy, NoopCommandSigner, NoopSignatureVerifier, SignatureVerifier,
+    CommandSigner, ConflictStrategy, MAX_COMMAND_PACKET_BYTES, NoopCommandSigner,
+    NoopSignatureVerifier, SignatureVerifier,
 };
 #[cfg(feature = "network-quic")]
 use crate::network::transport::TransportSession;
@@ -153,9 +154,20 @@ impl CommandPipeline {
         if !new_entries.is_empty() {
             self.last_published = self.log.latest_id();
             let batch = self.session.craft_command_batch(new_entries);
-            let packet =
-                CommandPacket::from_batch(&batch).expect("serialize command batch for transport");
-            self.pending_packets.push(packet);
+            match CommandPacket::from_batch(&batch) {
+                Ok(packet) => {
+                    self.log.record_packet_nonce(&batch.author, batch.nonce);
+                    self.pending_packets.push(packet);
+                }
+                Err(err) => {
+                    self.metrics.record_payload_guard_drop();
+                    log::error!(
+                        "[commands] failed to serialize command batch {}: {}",
+                        batch.sequence,
+                        err
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -270,9 +282,34 @@ impl CommandPipeline {
         &mut self,
         packet: &CommandPacket,
     ) -> Result<Vec<CommandEntry>, CommandLogError> {
+        if packet.payload.len() > MAX_COMMAND_PACKET_BYTES {
+            self.metrics.record_payload_guard_drop();
+            log::warn!(
+                "[commands] dropping oversized command packet {} ({} bytes)",
+                packet.sequence,
+                packet.payload.len()
+            );
+            return Ok(Vec::new());
+        }
+
         let batch = packet
             .decode()
             .map_err(|err| CommandLogError::PacketDecodeFailed(err.to_string()))?;
+
+        if let Err(err) = self.log.verify_packet_nonce(&batch.author, batch.nonce) {
+            match err {
+                CommandLogError::ReplayDetected(author) => {
+                    self.metrics.record_replay_rejection();
+                    log::warn!(
+                        "[commands] packet replay detected for author {:?} (nonce {})",
+                        author,
+                        batch.nonce
+                    );
+                    return Ok(Vec::new());
+                }
+                other => return Err(other),
+            }
+        }
 
         let mut applied = Vec::new();
         for entry in batch.entries {
@@ -394,6 +431,7 @@ pub struct CommandMetricsSnapshot {
     pub signature_verify_latency_ms: f32,
     pub replay_rejections: u64,
     pub rate_limit_drops: u64,
+    pub payload_guard_drops: u64,
 }
 
 #[derive(Default)]
@@ -406,6 +444,7 @@ struct CommandMetricsInternal {
     queue_depth: usize,
     replay_rejections: u64,
     rate_limit_drops: u64,
+    payload_guard_drops: u64,
 }
 
 impl CommandMetricsInternal {
@@ -440,6 +479,10 @@ impl CommandMetricsInternal {
         self.rate_limit_drops = self.rate_limit_drops.saturating_add(1);
     }
 
+    fn record_payload_guard_drop(&mut self) {
+        self.payload_guard_drops = self.payload_guard_drops.saturating_add(1);
+    }
+
     fn record_signature_latency(&mut self, latency_ms: f32) {
         if latency_ms <= 0.0 {
             return;
@@ -466,6 +509,7 @@ impl CommandMetricsInternal {
             signature_verify_latency_ms: self.signature_verify_latency_ms,
             replay_rejections: self.replay_rejections,
             rate_limit_drops: self.rate_limit_drops,
+            payload_guard_drops: self.payload_guard_drops,
         }
     }
 }
@@ -537,7 +581,9 @@ mod tests {
 
         let batch = CommandBatch {
             sequence: 2,
+            nonce: 1,
             timestamp_ms: 888,
+            author: entry.author.id.clone(),
             entries: vec![entry.clone()],
         };
         let packet = CommandPacket::from_batch(&batch).expect("packet serialize");
@@ -594,7 +640,9 @@ mod tests {
         );
         let batch = CommandBatch {
             sequence: 7,
+            nonce: 42,
             timestamp_ms: 99,
+            author: AuthorId(42),
             entries: vec![remote_entry],
         };
         let packet = CommandPacket::from_batch(&batch).expect("packet serialize");

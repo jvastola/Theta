@@ -1,4 +1,6 @@
 use crate::network::EntityHandle;
+use serde::de::Error as DeError;
+use serde::ser::Error as SerError;
 use serde::{Deserialize, Serialize};
 use serde_json::Error as JsonError;
 use std::collections::{BTreeMap, HashMap};
@@ -555,6 +557,8 @@ pub struct CommandLog {
     replay_tracker: ReplayTracker,
     #[allow(dead_code)]
     rate_limiter: RateLimiterMap,
+    #[allow(dead_code)]
+    packet_tracker: ReplayTracker,
 }
 
 impl CommandLog {
@@ -569,6 +573,7 @@ impl CommandLog {
     ) -> Self {
         let replay_tracker = ReplayTracker::from_config(&config);
         let rate_limiter = RateLimiterMap::new(config.rate_limit.clone());
+        let packet_tracker = ReplayTracker::new();
         Self {
             lamport_clock: 0,
             entries: BTreeMap::new(),
@@ -578,6 +583,7 @@ impl CommandLog {
             config,
             replay_tracker,
             rate_limiter,
+            packet_tracker,
         }
     }
 
@@ -591,6 +597,22 @@ impl CommandLog {
 
     pub fn lamport(&self) -> u64 {
         self.lamport_clock
+    }
+
+    pub fn record_packet_nonce(&mut self, author: &AuthorId, nonce: u64) {
+        self.packet_tracker.record_local(author, nonce);
+    }
+
+    pub fn verify_packet_nonce(
+        &mut self,
+        author: &AuthorId,
+        nonce: u64,
+    ) -> Result<(), CommandLogError> {
+        if self.packet_tracker.accept_remote(author, nonce) {
+            Ok(())
+        } else {
+            Err(CommandLogError::ReplayDetected(author.clone()))
+        }
     }
 
     fn next_lamport(&mut self) -> u64 {
@@ -788,33 +810,57 @@ impl CommandLog {
     }
 
     pub fn integrate_packet(&mut self, packet: &CommandPacket) -> Result<usize, CommandLogError> {
+        if packet.payload.len() > MAX_COMMAND_PACKET_BYTES {
+            return Err(CommandLogError::PacketDecodeFailed(format!(
+                "command packet payload {} exceeds {} byte limit",
+                packet.payload.len(),
+                MAX_COMMAND_PACKET_BYTES
+            )));
+        }
+
         let batch = packet
             .decode()
             .map_err(|err| CommandLogError::PacketDecodeFailed(err.to_string()))?;
+        self.verify_packet_nonce(&batch.author, batch.nonce)?;
         self.integrate_batch(&batch)
     }
 }
 
+pub const MAX_COMMAND_PACKET_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandBatch {
     pub sequence: u64,
+    pub nonce: u64,
     pub timestamp_ms: u64,
+    pub author: AuthorId,
     pub entries: Vec<CommandEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandPacket {
     pub sequence: u64,
+    pub nonce: u64,
     pub timestamp_ms: u64,
     pub payload: Vec<u8>,
 }
 
 impl CommandPacket {
     pub fn from_batch(batch: &CommandBatch) -> Result<Self, JsonError> {
+        let payload = serde_json::to_vec(batch)?;
+        if payload.len() > MAX_COMMAND_PACKET_BYTES {
+            return Err(SerError::custom(format!(
+                "command batch payload {} exceeds {} byte limit",
+                payload.len(),
+                MAX_COMMAND_PACKET_BYTES
+            )));
+        }
+
         Ok(Self {
             sequence: batch.sequence,
+            nonce: batch.nonce,
             timestamp_ms: batch.timestamp_ms,
-            payload: serde_json::to_vec(batch)?,
+            payload,
         })
     }
 
@@ -823,9 +869,25 @@ impl CommandPacket {
     /// This method trusts the values from the payload for consistency, but you may wish to validate
     /// or reconcile these fields if you expect them to differ.
     pub fn decode(&self) -> Result<CommandBatch, JsonError> {
-        let batch: CommandBatch = serde_json::from_slice(&self.payload)?;
-        // If you want to ensure consistency, you could assert or compare the fields here.
-        // For now, we return the batch as deserialized.
+        if self.payload.len() > MAX_COMMAND_PACKET_BYTES {
+            return Err(DeError::custom(format!(
+                "command packet payload {} exceeds {} byte limit",
+                self.payload.len(),
+                MAX_COMMAND_PACKET_BYTES
+            )));
+        }
+
+        let mut batch: CommandBatch = serde_json::from_slice(&self.payload)?;
+        if batch.sequence != self.sequence {
+            batch.sequence = self.sequence;
+        }
+        if batch.timestamp_ms != self.timestamp_ms {
+            batch.timestamp_ms = self.timestamp_ms;
+        }
+        if batch.nonce != self.nonce {
+            batch.nonce = self.nonce;
+        }
+
         Ok(batch)
     }
 }
@@ -1248,7 +1310,9 @@ mod tests {
         let entries: Vec<_> = local.entries().cloned().collect();
         let batch = CommandBatch {
             sequence: 1,
+            nonce: 1,
             timestamp_ms: 123,
+            author: editor.id.clone(),
             entries,
         };
 
@@ -1256,6 +1320,74 @@ mod tests {
         assert_eq!(applied, 3);
         let remote_entries: Vec<_> = remote.entries().cloned().collect();
         assert_eq!(remote_entries.len(), 3);
+    }
+
+    #[test]
+    fn packet_nonce_replay_is_rejected() {
+        let registry = setup_registry();
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let mut log = CommandLog::new(registry, verifier);
+        let author = AuthorId(21);
+
+        log.record_packet_nonce(&author, 5);
+        assert!(log.verify_packet_nonce(&author, 6).is_ok());
+        let replay = log.verify_packet_nonce(&author, 5);
+        match replay {
+            Err(CommandLogError::ReplayDetected(id)) => assert_eq!(id, author),
+            other => panic!("expected replay detected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_packet_payload_cap_is_enforced() {
+        let registry = setup_registry();
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let mut log = CommandLog::new(registry, verifier);
+
+        let author = CommandAuthor::new(AuthorId(31), CommandRole::Editor);
+        let large_payload = vec![0u8; MAX_COMMAND_PACKET_BYTES + 1];
+        let entry = CommandEntry::new(
+            CommandId::new(1, AuthorId(31)),
+            0,
+            CommandPayload::new("editor.selection", CommandScope::Global, large_payload),
+            ConflictStrategy::Merge,
+            author.clone(),
+            None,
+        );
+
+        let batch = CommandBatch {
+            sequence: 1,
+            nonce: 1,
+            timestamp_ms: 100,
+            author: author.id.clone(),
+            entries: vec![entry],
+        };
+
+        assert!(CommandPacket::from_batch(&batch).is_err());
+
+        // Manually encode a smaller batch to show that integration still works when under the cap.
+        let small_entry = CommandEntry::new(
+            CommandId::new(2, AuthorId(31)),
+            1,
+            CommandPayload::new("editor.selection", CommandScope::Global, vec![1, 2, 3]),
+            ConflictStrategy::Merge,
+            author.clone(),
+            None,
+        );
+        let ok_batch = CommandBatch {
+            sequence: 2,
+            nonce: 2,
+            timestamp_ms: 200,
+            author: author.id.clone(),
+            entries: vec![small_entry.clone()],
+        };
+        let packet = CommandPacket::from_batch(&ok_batch).expect("packet serialize");
+        let applied = log.integrate_packet(&packet).expect("integrate packet");
+        assert_eq!(applied, 1);
+        assert!(log.entries().any(|entry| entry.id == small_entry.id));
+
+        let replay_err = log.integrate_packet(&packet);
+        assert!(matches!(replay_err, Err(CommandLogError::ReplayDetected(id)) if id == author.id));
     }
 
     proptest::proptest! {
@@ -1308,9 +1440,15 @@ mod tests {
                 if local.append_local(&signer, payload, Some(strategy)).is_ok() {
                     let new_entries = local.entries_since(last_id.as_ref());
                     if !new_entries.is_empty() {
+                        let batch_author = new_entries
+                            .first()
+                            .map(|entry| entry.author.id.clone())
+                            .unwrap_or_else(|| AuthorId(0));
                         let batch = CommandBatch {
                             sequence: batches.len() as u64 + 1,
+                            nonce: batches.len() as u64 + 1,
                             timestamp_ms: batches.len() as u64 + 100,
+                            author: batch_author,
                             entries: new_entries.clone(),
                         };
                         remote.integrate_batch(&batch).expect("batch replay");

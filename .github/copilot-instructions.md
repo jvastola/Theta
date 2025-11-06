@@ -1,20 +1,31 @@
-- [x] Verify that the copilot-instructions.md file in the .github directory is created. Created file with required checklist and guidance.
+# Theta Engine – Copilot Instructions
+- **Mission**: Ship a VR-first Rust game engine and collaborative mesh editor; keep the ECS, command pipeline, and telemetry loop deterministic across peers.
+- **Entry Points**: `src/main.rs` boots `theta_engine::run()`, which builds the `engine::Engine` orchestrating all subsystems.
+- **Docs**: Start with `README.md` for phase status and `docs/architecture.md` and `docs/phase5_parallel_plan.md` for subsystem intent and sprint priorities.
 
-- [x] Clarify Project Requirements. Confirmed Rust VR game engine with ECS, GPU optimizations, multiplayer, and PolySketch-like mesh editor requirements.
+## Architecture Essentials
+- `src/engine/mod.rs` wires the frame loop, stage scheduler, VR input providers, renderer selection, and command/telemetry components; extend systems through `Engine::add_system{,_fn,_parallel_fn}`.
+- `engine/schedule` owns the stage graph (`Startup → Simulation → Render → Editor`) and captures profiling data; respect read/write metadata so parallel stages stay read-only safe.
+- `ecs::World` is a slim archetype placeholder; register components before use and rely on `register_component_types!` so they show up in `schemas/component_manifest.json`.
+- Command infrastructure (`editor::commands`, `engine::CommandPipeline`, `CommandOutbox`, `CommandTransportQueue`) powers undo/redo and replication; when emitting commands, set the correct `CommandScope` and keep payloads `serde_json` friendly.
+- Telemetry lives in `editor::telemetry`; use `FrameTelemetry` to surface frame stats, and publish through `TelemetryReplicator` so network transports can stream diagnostics.
 
-- [x] Scaffold the Project. Ran `cargo init --vcs none .` to scaffold Rust application in place.
+## Networking & Schema
+- QUIC integration (feature `network-quic`) depends on `network/transport`, `command_log`, and `replication`; tests expect Ed25519 signatures, Lamport clocks, and per-author metrics to remain consistent.
+- Schemas use FlatBuffers (`schemas/network.fbs`); regenerate with `flatc` when the schema changes and keep the component manifest in sync via `cargo run --bin generate_manifest [optional/path]`.
+- Stable component IDs come from SipHash seeds in `network/schema.rs`; adding components without registering breaks determinism and blocks replication tests.
 
-- [x] Customize the Project. Drafted architecture plan in README and scaffolded engine, ECS, render, VR, editor, and network modules with placeholders.
+## Rendering & VR
+- Renderer picks backends via `render::BackendKind`; null backend is default, `render-wgpu` enables `render/wgpu_backend.rs`. Guard GPU-specific code with the same features.
+- VR input defaults to `SimulatedInputProvider`; feature `vr-openxr` swaps in `vr/openxr::OpenXrInputProvider`. Always fall back gracefully and log hardware failures.
 
-- [x] Install Required Extensions. No extensions specified by project setup info; skipping.
+## Workflows & Testing
+- Build with `cargo build`; run the frame loop using the VS Code task (`cargo run`). `Engine::configure_max_frames` caps iterations (default 3) to keep tests deterministic.
+- Core suites live under `tests/`: `command_pipeline_integration.rs`, `replication_integration.rs`, and `telemetry_integration.rs`. Use `cargo test` and rerun with relevant features (`cargo test --all-targets --features network-quic,render-wgpu` when touching transport or GPU paths).
+- Keep formatting/lints clean using `cargo fmt` and `cargo clippy --all-targets --all-features` before posting changes.
 
-- [x] Compile the Project. `cargo build` succeeds with current scaffolding.
-
-- [x] Create and Run Task. Added `.vscode/tasks.json` with a `cargo run` task and executed it successfully.
-
-- [x] Launch the Project. Ran `cargo run` via VS Code task to verify startup.
-
-- [x] Ensure Documentation is Complete. README is current and instructions file cleaned of HTML comments.
-- Work through each checklist item systematically.
-- Keep communication concise and focused.
-- Follow development best practices.
+## Collaboration Tips
+- New systems should register components in `engine::Engine::register_core_systems` or a dedicated setup stage; expose critical metrics via telemetry if they affect frame health.
+- Command packets should flow outbox → transport queue → pipeline; if you bypass a layer, update integration tests and metrics counters in `editor::CommandTransportQueue`.
+- When expanding replication, adjust both `ReplicationRegistry` (type registration) and `DeltaTracker` expectations; integration tests assert chunking and diff semantics.
+- Update the relevant docs in `docs/` (e.g., `status_overview.md`, sprint plans) when changing subsystem behavior; reviewers expect documentation alongside code.

@@ -312,7 +312,9 @@ mod tests {
         );
         let batch = CommandBatch {
             sequence: 5,
+            nonce: 1,
             timestamp_ms: 999,
+            author: AuthorId(7),
             entries: vec![entry],
         };
 
@@ -348,7 +350,9 @@ mod tests {
         );
         let batch = CommandBatch {
             sequence: 3,
+            nonce: 7,
             timestamp_ms: 555,
+            author: AuthorId(1),
             entries: vec![entry],
         };
 
@@ -370,6 +374,7 @@ mod tests {
         let mut queue = CommandTransportQueue::new();
         let packet = CommandPacket {
             sequence: 1,
+            nonce: 1,
             timestamp_ms: 100,
             payload: vec![1, 2, 3],
         };

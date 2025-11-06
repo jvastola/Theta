@@ -254,10 +254,15 @@ impl TelemetryOverlay {
                 lines.push(format!("    Conflicts {}", conflicts.join(", ")));
             }
 
-            if commands.rate_limit_drops > 0 || commands.replay_rejections > 0 {
+            if commands.rate_limit_drops > 0
+                || commands.replay_rejections > 0
+                || commands.payload_guard_drops > 0
+            {
                 lines.push(format!(
-                    "    Guards rate-limit {} replay {}",
-                    commands.rate_limit_drops, commands.replay_rejections
+                    "    Guards rate-limit {} replay {} payload {}",
+                    commands.rate_limit_drops,
+                    commands.replay_rejections,
+                    commands.payload_guard_drops
                 ));
             }
         }
@@ -453,6 +458,7 @@ mod tests {
             signature_verify_latency_ms: 5.25,
             replay_rejections: 1,
             rate_limit_drops: 2,
+            payload_guard_drops: 0,
         }));
 
         overlay.ingest(sample);
@@ -461,7 +467,7 @@ mod tests {
         assert!(panel.contains("total 7"));
         assert!(panel.contains("queue 4"));
         assert!(panel.contains("Conflicts"));
-        assert!(panel.contains("Guards rate-limit 2 replay 1"));
+        assert!(panel.contains("Guards rate-limit 2 replay 1 payload 0"));
     }
 
     proptest::prop_compose! {
