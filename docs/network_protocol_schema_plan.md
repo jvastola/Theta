@@ -1,5 +1,10 @@
 # Theta Network Protocol Schema Plan
 
+**Doc Guide:**
+- For high-level engine architecture, see [Architecture](architecture.md).
+- For diagrams, see [Architecture Diagrams](architecture-diagrams.md).
+- For roadmap, metrics, and test plans, see [INDEX](INDEX.md) and [Phase 5 Parallel Plan](phase5_parallel_plan.md).
+
 ## Objectives
 - Provide a deterministic, low-latency replication layer for ECS state, editor commands, and VR input streams.
 - Support heterogeneous transports (native QUIC, WebRTC data channels) without leaking transport-specific details into gameplay layers.

@@ -1,5 +1,10 @@
 # Theta Engine Architectural Specification
 
+**Doc Guide:**
+- For diagrams, see [Architecture Diagrams](architecture-diagrams.md).
+- For protocol and schema details, see [Network Protocol Schema Plan](network_protocol_schema_plan.md).
+- For roadmap, metrics, and test plans, see [INDEX](INDEX.md) and [Phase 5 Parallel Plan](phase5_parallel_plan.md).
+
 ## Purpose
 Define the foundational architecture for the Theta Engine VR-first game engine and editor, detailing subsystems, responsibilities, data flow, and technical milestones required to reach a collaborative VR mesh-authoring experience.
 

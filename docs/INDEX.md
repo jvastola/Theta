@@ -1,31 +1,34 @@
 # Theta Engine Documentation Index
 
-**Last Updated:** October 31, 2025
+**Last Updated:** November 5, 2025
 
 ## Quick Links
 
 ### 📋 Project Overview
 - **[README](../README.md)** - Project introduction, current status, feature flags
+- **[Status Overview](status_overview.md)** - Unified snapshot of phases, metrics, and active work
 - **[Architecture](architecture.md)** - High-level system design, subsystem overview, design decisions
 - **[Roadmap (November 2025)](roadmap_november_2025.md)** - Comprehensive development roadmap with sprint schedule
 - **[Completion Summary](COMPLETION_SUMMARY.md)** - Detailed summary of all completed work (Phases 1-4)
 
 ### 📊 Current Status
-- **[Phase 4 Status](phase4_status.md)** - Command Log implementation status (75% complete)
-- **Current Sprint:** Week 9 (Nov 1-7, 2025) - Phase 4 Completion
-- **Active Work:** QUIC command broadcast, metrics integration, additional editor commands
-- **Tests:** 59 passing (53 unit + 6 integration), 0 failures
+- **[Phase 4 Status](phase4_status.md)** - Command Log implementation wrap-up (✅ 100% complete)
+- **Current Focus:** Phase 5 kickoff (Security hardening, transport resilience, compression)
+- **Active Work:** Nonce-based replay protection, WebRTC data-channel prototype, Zstd compression integration
+- **Tests:** 66 passing, 0 failures
 
 ### 📖 Phase Documentation
 
 #### Completed Phases:
-- **[Phase 2 Review](phase2_review.md)** - QUIC Transport & Handshake (✅ Complete)
-- **[Phase 3 Plan](phase3_plan.md)** - ECS Replication Pipeline Planning
-- **[Phase 3 Review](phase3_review.md)** - ECS Replication Pipeline (✅ Complete)
+- **[Phase 2 Review](archive/phase2_review.md)** - QUIC Transport & Handshake (✅ Complete)
+- **[Phase 3 Plan](archive/phase3_plan.md)** - ECS Replication Pipeline Planning (historical)
+- **[Phase 3 Review](archive/phase3_review.md)** - ECS Replication Pipeline (✅ Complete)
+- **[Phase 1–4 Summary](archive/phase1-4_summary.md)** - Consolidated outcomes for the first four phases
 
-#### Active Phases:
-- **[Phase 4 Plan](phase4_plan.md)** - Command Log & Conflict Resolution Planning
-- **[Phase 4 Status](phase4_status.md)** - Current implementation status (🔄 75% complete)
+#### Upcoming Phases:
+- **[Phase 5 Parallel Plan](phase5_parallel_plan.md)** - Production hardening & WebRTC fallback
+- **[Phase 4 Plan](phase4_plan.md)** - Reference plan for completed command log work
+- **[Phase 4 Status](phase4_status.md)** - Final report for command log delivery
 
 ### 🏗️ Architecture & Design
 
@@ -50,7 +53,7 @@
 - **[Network FlatBuffers Schema](../schemas/network.fbs)** - Network protocol message definitions
 
 ### 🔬 Testing & Quality
-- **Test Coverage:** 59 tests (100% pass rate)
+- **Test Coverage:** 66 tests (100% pass rate)
   - Unit tests: 53 (ECS, scheduler, command log, replication, etc.)
   - Integration tests: 6 (command pipeline, replication, telemetry)
 - **CI Pipeline:** cargo fmt, clippy, tests, schema validation
@@ -80,7 +83,7 @@ cargo test                             # Run tests
 cargo test --features network-quic     # Run with networking
 ```
 
-### 📈 Project Metrics (Oct 31, 2025)
+### 📈 Project Metrics (Nov 5, 2025)
 
 #### Code Statistics:
 - **Total LOC:** ~11,000 (8,500 source + 2,500 tests)
@@ -91,8 +94,8 @@ cargo test --features network-quic     # Run with networking
 - **Phase 1 (Foundation):** ✅ 100% Complete
 - **Phase 2 (Transport):** ✅ 100% Complete
 - **Phase 3 (Replication):** ✅ 100% Complete
-- **Phase 4 (Command Log):** 🔄 75% Complete (target: Nov 7)
-- **Phase 5 (Hardening):** 📋 Planned (Nov 8-28)
+- **Phase 4 (Command Log):** ✅ 100% Complete
+- **Phase 5 (Hardening):** � Kickoff (Nov 8-28)
 - **Phase 6 (Mesh Editor):** 📋 Planned (Nov 29 - Dec 19)
 - **Phase 7 (Quest 3):** 📋 Planned (Dec 20 - Jan 16, 2026)
 
@@ -127,23 +130,24 @@ cargo test --features network-quic     # Run with networking
 ## Document Navigation Tips
 
 ### By Role:
-- **New Contributors:** Start with README → Architecture → Current Phase Status
-- **Networking Engineers:** Network Protocol Schema Plan → Phase 2/3/4 Reviews
+- **New Contributors:** Start with README → Architecture → Unified Status Overview
+- **Networking Engineers:** Network Protocol Schema Plan → Archived Phase 2/3 Reviews → Phase 4 Status
 - **Graphics Engineers:** Architecture (Renderer section) → render/mod.rs
 - **VR Engineers:** Architecture (VR section) → vr/mod.rs → vr/openxr.rs
-- **Project Managers:** Roadmap → Completion Summary → Phase Status
+- **Project Managers:** Roadmap → Completion Summary → Unified Status Overview
 
 ### By Topic:
 - **Understanding ECS:** Architecture → ecs/mod.rs → engine/schedule.rs
-- **Understanding Networking:** Network Protocol Schema Plan → Phase 2/3/4 docs
-- **Understanding Commands:** Phase 4 Plan/Status → network/command_log.rs
+- **Understanding Networking:** Network Protocol Schema Plan → archive/phase2_review.md → archive/phase3_review.md → phase4_status.md
+- **Understanding Commands:** phase4_status.md → phase4_plan.md → network/command_log.rs
 - **Understanding Tests:** Test files in tests/ → CI workflow
 
 ### By Phase:
 - **Phase 1:** Architecture (foundational sections)
-- **Phase 2:** Phase 2 Review → network/transport.rs
-- **Phase 3:** Phase 3 Review → network/replication.rs
-- **Phase 4:** Phase 4 Status → network/command_log.rs → editor/commands.rs
+- **Phase 2:** archive/phase2_review.md → network/transport.rs
+- **Phase 3:** archive/phase3_review.md → network/replication.rs
+- **Phase 4:** phase4_status.md → network/command_log.rs → editor/commands.rs
+- **Phase 5:** phase5_parallel_plan.md → roadmap_november_2025.md
 
 ---
 
@@ -165,4 +169,4 @@ cargo test --features network-quic     # Run with networking
 ---
 
 **Index Maintained By:** Documentation Team  
-**Next Review:** November 7, 2025 (Phase 4 Completion)
+**Next Review:** November 21, 2025 (Phase 5 midpoint)

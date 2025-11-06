@@ -1,5 +1,10 @@
 # Theta Engine System Architecture Diagrams
 
+**Doc Guide:**
+- For full system overview, see [Architecture](architecture.md).
+- For protocol and schema details, see [Network Protocol Schema Plan](network_protocol_schema_plan.md).
+- For roadmap and telemetry context, see [INDEX](INDEX.md) and [Phase 5 Parallel Plan](phase5_parallel_plan.md).
+
 This document captures high-level UML-style views of the Theta Engine. Diagrams are authored in [Mermaid](https://mermaid.js.org/) so they can be rendered directly in supporting tooling.
 
 ## Module Overview
