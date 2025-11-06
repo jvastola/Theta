@@ -20,6 +20,7 @@ network-quic = [
 	"tokio-util",
 	"futures-util",
 	"bytes",
+	"url",
 ]
 command-log-persistence = []
 
@@ -48,6 +49,7 @@ tokio-tungstenite = { version = "0.20", optional = true }
 tokio-util = { version = "0.7", optional = true }
 futures-util = { version = "0.3", optional = true }
 bytes = { version = "1", optional = true }
+url = { version = "2", optional = true }
 
 [build-dependencies]
 which = "4"

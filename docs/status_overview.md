@@ -28,7 +28,7 @@
 
 ### Phase 5 Kickoff (Production Hardening)
 - **Security Hardening:** Nonce-based replay protection, token-bucket rate limiting, and 64 KiB payload guards are live with telemetry counters (`replay_rejections`, `rate_limit_drops`, `payload_guard_drops`). Persistence backing remains on the roadmap.
-- **Transport Resilience:** QUIC remains the primary path while the WebRTC fallback now carries command packets over an async data-channel bridge with shared metrics plumbing. Convergence and TURN/STUN hardening are the next milestones.
+- **Transport Resilience:** QUIC remains the primary path while the WebRTC fallback now carries command packets over an async data-channel bridge with shared metrics plumbing. The engine automatically boots a signaling endpoint (overridable via `THETA_SIGNALING_*` env vars) and registers the local peer on startup. Convergence and TURN/STUN hardening are the next milestones.
 - **Compression & Interest Management:** Zstd dictionary integration for command/replication payloads, spatial interest filters, nightly bandwidth benchmarks.
 - **Documentation & Protocol:** Editor command schema publication, operator runbook updates, telemetry export guides.
 - Reference plan: `docs/phase5_parallel_plan.md` (parallel work streams and owners).

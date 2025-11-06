@@ -710,10 +710,10 @@ fn forward_ice_candidates(source: &Arc<RTCPeerConnection>, destination: Arc<RTCP
     source.on_ice_candidate(Box::new(move |candidate| {
         let tx = candidate_tx.clone();
         Box::pin(async move {
-            if let Some(candidate) = candidate {
-                if let Ok(json) = candidate.to_json() {
-                    let _ = tx.send(json);
-                }
+            if let Some(candidate) = candidate
+                && let Ok(json) = candidate.to_json()
+            {
+                let _ = tx.send(json);
             }
         })
     }));

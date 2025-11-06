@@ -15,6 +15,11 @@ use crate::editor::{CommandOutbox, CommandTransportQueue};
 use crate::network::EntityHandle;
 use crate::network::command_log::{CommandBatch, CommandEntry, CommandPacket, CommandScope};
 #[cfg(feature = "network-quic")]
+use crate::network::signaling::{
+    IceCandidate, PeerId, RoomId, SessionDescription, SignalingClient, SignalingError,
+    SignalingHandle, SignalingResponse, SignalingServer,
+};
+#[cfg(feature = "network-quic")]
 use crate::network::transport::{
     CommandTransport, TransportError, TransportSession, WebRtcTransport,
 };
@@ -26,12 +31,24 @@ use crate::vr::{
 };
 use schedule::{Scheduler, Stage, System};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "network-quic")]
+use std::collections::HashMap;
+#[cfg(feature = "network-quic")]
+use std::env;
+#[cfg(feature = "network-quic")]
+use std::net::{IpAddr, SocketAddr};
+#[cfg(feature = "network-quic")]
+use std::process;
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "network-quic")]
 use std::time::Duration;
 use std::time::Instant;
 #[cfg(feature = "network-quic")]
 use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
+#[cfg(feature = "network-quic")]
+use tokio::sync::Mutex as TokioMutex;
+#[cfg(feature = "network-quic")]
+use url::Url;
 
 const DEFAULT_MAX_FRAMES: u32 = 3;
 
@@ -49,6 +66,16 @@ pub struct Engine {
     command_transport: Option<CommandTransport>,
     #[cfg(feature = "network-quic")]
     network_runtime: Option<TokioRuntime>,
+    #[cfg(feature = "network-quic")]
+    signaling_handle: Option<SignalingHandle>,
+    #[cfg(feature = "network-quic")]
+    signaling_clients: HashMap<PeerId, Arc<TokioMutex<SignalingClient>>>,
+    #[cfg(feature = "network-quic")]
+    local_signaling_peer: Option<PeerId>,
+    #[cfg(feature = "network-quic")]
+    signaling_room: Option<RoomId>,
+    #[cfg(feature = "network-quic")]
+    signaling_endpoint: Option<Url>,
 }
 
 impl Engine {
@@ -80,9 +107,23 @@ impl Engine {
             command_transport: None,
             #[cfg(feature = "network-quic")]
             network_runtime: None,
+            #[cfg(feature = "network-quic")]
+            signaling_handle: None,
+            #[cfg(feature = "network-quic")]
+            signaling_clients: HashMap::new(),
+            #[cfg(feature = "network-quic")]
+            local_signaling_peer: None,
+            #[cfg(feature = "network-quic")]
+            signaling_room: None,
+            #[cfg(feature = "network-quic")]
+            signaling_endpoint: None,
         };
 
         engine.register_core_systems();
+        #[cfg(feature = "network-quic")]
+        if let Err(err) = engine.bootstrap_signaling() {
+            log::error!("[engine] failed to bootstrap signaling: {err}");
+        }
         engine
     }
 
@@ -100,15 +141,7 @@ impl Engine {
             pipeline.attach_transport_metrics(transport.metrics_handle());
         }
 
-        if self.network_runtime.is_none() {
-            self.network_runtime = Some(
-                TokioRuntimeBuilder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("create network runtime"),
-            );
-        }
-
+        self.ensure_network_runtime();
         self.command_transport = Some(transport);
     }
 
@@ -120,6 +153,189 @@ impl Engine {
     #[cfg(feature = "network-quic")]
     pub fn attach_webrtc_transport(&mut self, transport: WebRtcTransport) {
         self.attach_command_transport(CommandTransport::from(transport));
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn start_signaling_server(
+        &mut self,
+        addr: SocketAddr,
+    ) -> Result<SocketAddr, SignalingError> {
+        self.ensure_network_runtime();
+
+        if let Some(handle) = self.signaling_handle.take() {
+            self.shutdown_signaling_handle(handle);
+            self.signaling_endpoint = None;
+        }
+
+        self.signaling_clients.clear();
+        self.local_signaling_peer = None;
+        self.signaling_room = None;
+
+        let server = {
+            let runtime = self
+                .network_runtime
+                .as_mut()
+                .expect("network runtime should exist");
+            runtime.block_on(SignalingServer::bind(addr))?
+        };
+        let local_addr = server.local_addr();
+        let handle = {
+            let runtime = self
+                .network_runtime
+                .as_mut()
+                .expect("network runtime should exist");
+            runtime.block_on(async move { server.start() })
+        };
+        self.signaling_handle = Some(handle);
+        Ok(local_addr)
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn active_signaling_addr(&self) -> Option<SocketAddr> {
+        self.signaling_handle
+            .as_ref()
+            .map(|handle| handle.local_addr())
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn stop_signaling_server(&mut self) {
+        let had_handle = self.signaling_handle.is_some();
+        if let Some(handle) = self.signaling_handle.take() {
+            self.shutdown_signaling_handle(handle);
+        }
+
+        if had_handle {
+            self.signaling_endpoint = None;
+        }
+
+        self.signaling_clients.clear();
+        self.local_signaling_peer = None;
+        self.signaling_room = None;
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn drain_signaling_errors(&mut self) -> Vec<String> {
+        if let Some(handle) = self.signaling_handle.as_ref() {
+            return handle.drain_errors();
+        }
+
+        Vec::new()
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn connect_signaling_client(
+        &mut self,
+        endpoint: Url,
+        peer_id: PeerId,
+        room_id: RoomId,
+        timeout: Duration,
+    ) -> Result<Vec<PeerId>, SignalingError> {
+        self.ensure_network_runtime();
+        let mut client = {
+            let runtime = self
+                .network_runtime
+                .as_mut()
+                .expect("network runtime should exist");
+            runtime.block_on(SignalingClient::connect(endpoint, peer_id.clone(), room_id))?
+        };
+        let peers = {
+            let runtime = self
+                .network_runtime
+                .as_mut()
+                .expect("network runtime should exist");
+            runtime.block_on(client.register(timeout))?
+        };
+        let client = Arc::new(TokioMutex::new(client));
+        self.signaling_clients.insert(peer_id, client);
+        Ok(peers)
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn signaling_client(&self, peer_id: &PeerId) -> Option<Arc<TokioMutex<SignalingClient>>> {
+        self.signaling_clients.get(peer_id).cloned()
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn remove_signaling_client(&mut self, peer_id: &PeerId) {
+        self.signaling_clients.remove(peer_id);
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn signaling_next_event(
+        &mut self,
+        peer_id: &PeerId,
+        timeout: Duration,
+    ) -> Result<Option<SignalingResponse>, SignalingError> {
+        let client = match self.signaling_clients.get(peer_id) {
+            Some(client) => Arc::clone(client),
+            None => return Ok(None),
+        };
+
+        let runtime = self.ensure_network_runtime();
+        runtime.block_on(async move {
+            let mut guard = client.lock().await;
+            guard.next_event(timeout).await
+        })
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn signaling_send_offer(
+        &mut self,
+        from: &PeerId,
+        to: &PeerId,
+        sdp: SessionDescription,
+    ) -> Result<(), SignalingError> {
+        let client = self
+            .signaling_clients
+            .get(from)
+            .cloned()
+            .ok_or(SignalingError::ClientNotRegistered)?;
+        let to_peer = to.clone();
+        let runtime = self.ensure_network_runtime();
+        runtime.block_on(async move {
+            let mut guard = client.lock().await;
+            guard.send_offer(&to_peer, sdp).await
+        })
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn signaling_send_answer(
+        &mut self,
+        from: &PeerId,
+        to: &PeerId,
+        sdp: SessionDescription,
+    ) -> Result<(), SignalingError> {
+        let client = self
+            .signaling_clients
+            .get(from)
+            .cloned()
+            .ok_or(SignalingError::ClientNotRegistered)?;
+        let to_peer = to.clone();
+        let runtime = self.ensure_network_runtime();
+        runtime.block_on(async move {
+            let mut guard = client.lock().await;
+            guard.send_answer(&to_peer, sdp).await
+        })
+    }
+
+    #[cfg(feature = "network-quic")]
+    pub fn signaling_send_ice_candidate(
+        &mut self,
+        from: &PeerId,
+        to: &PeerId,
+        candidate: IceCandidate,
+    ) -> Result<(), SignalingError> {
+        let client = self
+            .signaling_clients
+            .get(from)
+            .cloned()
+            .ok_or(SignalingError::ClientNotRegistered)?;
+        let to_peer = to.clone();
+        let runtime = self.ensure_network_runtime();
+        runtime.block_on(async move {
+            let mut guard = client.lock().await;
+            guard.send_ice_candidate(&to_peer, candidate).await
+        })
     }
 
     pub fn add_system<S>(&mut self, stage: Stage, name: &'static str, system: S)
@@ -402,6 +618,154 @@ impl Engine {
             }
         }
     }
+}
+
+#[cfg(feature = "network-quic")]
+impl Engine {
+    fn ensure_network_runtime(&mut self) -> &mut TokioRuntime {
+        if self.network_runtime.is_none() {
+            self.network_runtime = Some(
+                TokioRuntimeBuilder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("create network runtime"),
+            );
+        }
+
+        self.network_runtime
+            .as_mut()
+            .expect("network runtime should exist")
+    }
+
+    fn bootstrap_signaling(&mut self) -> Result<(), SignalingError> {
+        let config = SignalingBootstrapConfig::from_env()?;
+        if config.disabled {
+            log::info!("[engine] signaling bootstrap disabled via environment");
+            return Ok(());
+        }
+
+        self.stop_signaling_server();
+        self.signaling_endpoint = None;
+
+        let endpoint = match config.endpoint.clone() {
+            Some(url) => url,
+            None => {
+                let addr = self.start_signaling_server(config.bind_addr)?;
+                Engine::signaling_url_from_addr(addr)?
+            }
+        };
+
+        let peers = self.connect_signaling_client(
+            endpoint.clone(),
+            config.peer_id.clone(),
+            config.room_id.clone(),
+            config.timeout,
+        )?;
+
+        if peers.is_empty() {
+            log::info!(
+                "[engine] signaling connected as {} in room {}",
+                config.peer_id.0,
+                config.room_id.0
+            );
+        } else {
+            let peer_list = peers
+                .iter()
+                .map(|peer| peer.0.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            log::info!(
+                "[engine] signaling connected as {} in room {} ({} peers: {})",
+                config.peer_id.0,
+                config.room_id.0,
+                peers.len(),
+                peer_list
+            );
+        }
+
+        self.local_signaling_peer = Some(config.peer_id);
+        self.signaling_room = Some(config.room_id);
+        self.signaling_endpoint = Some(endpoint);
+        Ok(())
+    }
+
+    fn signaling_url_from_addr(addr: SocketAddr) -> Result<Url, SignalingError> {
+        let host = match addr.ip() {
+            IpAddr::V4(ip) => ip.to_string(),
+            IpAddr::V6(ip) => format!("[{ip}]"),
+        };
+        let url = Url::parse(&format!("ws://{host}:{}/ws", addr.port()))?;
+        Ok(url)
+    }
+
+    fn shutdown_signaling_handle(&mut self, handle: SignalingHandle) {
+        let errors = handle.drain_errors();
+        for error in errors {
+            eprintln!("[engine] signaling error before shutdown: {error}");
+        }
+
+        handle.shutdown();
+    }
+}
+
+#[cfg(feature = "network-quic")]
+struct SignalingBootstrapConfig {
+    disabled: bool,
+    bind_addr: SocketAddr,
+    endpoint: Option<Url>,
+    peer_id: PeerId,
+    room_id: RoomId,
+    timeout: Duration,
+}
+
+#[cfg(feature = "network-quic")]
+impl SignalingBootstrapConfig {
+    fn from_env() -> Result<Self, SignalingError> {
+        let disabled = env::var("THETA_SIGNALING_DISABLED")
+            .map(|value| is_env_truthy(&value))
+            .unwrap_or(false);
+
+        let bind_addr = match env::var("THETA_SIGNALING_BIND") {
+            Ok(value) => value.parse().map_err(|err| {
+                SignalingError::UnexpectedResponse(format!(
+                    "invalid THETA_SIGNALING_BIND value '{value}': {err}"
+                ))
+            })?,
+            Err(_) => "127.0.0.1:0"
+                .parse()
+                .expect("literal bind address should parse"),
+        };
+
+        let endpoint = match env::var("THETA_SIGNALING_URL") {
+            Ok(value) => Some(Url::parse(&value)?),
+            Err(_) => None,
+        };
+
+        let peer_id =
+            PeerId(env::var("THETA_PEER_ID").unwrap_or_else(|_| format!("peer-{}", process::id())));
+        let room_id = RoomId(env::var("THETA_ROOM_ID").unwrap_or_else(|_| "default".to_string()));
+
+        let timeout = env::var("THETA_SIGNALING_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_else(|| Duration::from_secs(2));
+
+        Ok(Self {
+            disabled,
+            bind_addr,
+            endpoint,
+            peer_id,
+            room_id,
+            timeout,
+        })
+    }
+}
+
+#[cfg(feature = "network-quic")]
+fn is_env_truthy(value: &str) -> bool {
+    let lowered = value.trim().to_ascii_lowercase();
+    matches!(lowered.as_str(), "1" | "true" | "yes" | "on")
 }
 
 #[derive(Default)]

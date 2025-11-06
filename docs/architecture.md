@@ -81,6 +81,7 @@ Define the foundational architecture for the Theta Engine VR-first game engine a
   - Input prediction for latency-sensitive gestures.
   - Conflict resolution driven by CRDT-inspired command logs merged deterministically.
 - **Session Management:** Lobby discovery, host migration, and user permissions for editing operations.
+- **Signaling Bootstrap:** With `network-quic` enabled the engine now brings up a local WebSocket signaling endpoint at startup, registers the local peer, and publishes the resulting metrics. Override the behavior with `THETA_SIGNALING_URL` (external server), `THETA_SIGNALING_BIND` (bind address), `THETA_PEER_ID`, `THETA_ROOM_ID`, `THETA_SIGNALING_TIMEOUT_MS`, or disable entirely via `THETA_SIGNALING_DISABLED=1`.
 
 ## GPU Optimization Focus Areas
 - Batched component uploads using persistently mapped buffers.
