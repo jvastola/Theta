@@ -103,8 +103,8 @@ impl CommandPipeline {
                 .require_signature(false)
                 .build(),
         );
-    let registry = Arc::new(registry);
-    let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let registry = Arc::new(registry);
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
         let log = CommandLog::new(Arc::clone(&registry), verifier);
         let author = CommandAuthor::new(AuthorId(0), CommandRole::Editor);
         let signer: Box<dyn CommandSigner> = Box::new(NoopCommandSigner::new(author));

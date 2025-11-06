@@ -1044,7 +1044,7 @@ mod tests {
     #[test]
     fn append_local_respects_rate_limiter() {
         let registry = setup_registry();
-    let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
         let config =
             CommandLogConfig::with_rate_limit(RateLimitConfig::new(1, 0, Duration::from_secs(1)));
         let mut log = CommandLog::with_config(Arc::clone(&registry), verifier, config);
@@ -1066,7 +1066,7 @@ mod tests {
     #[test]
     fn integrate_remote_rejects_stale_entries() {
         let registry = setup_registry();
-    let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
         let mut source = CommandLog::new(Arc::clone(&registry), Arc::clone(&verifier));
         let mut sink = CommandLog::new(Arc::clone(&registry), verifier);
 
@@ -1099,7 +1099,7 @@ mod tests {
     #[test]
     fn entries_since_tracks_latest_id() {
         let registry = setup_registry();
-    let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
         let mut log = CommandLog::new(registry.clone(), verifier);
 
         let editor = CommandAuthor::new(AuthorId(9), CommandRole::Editor);
@@ -1128,7 +1128,7 @@ mod tests {
     #[test]
     fn append_local_respects_permissions() {
         let registry = setup_registry();
-    let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
         let mut log = CommandLog::new(registry.clone(), verifier);
 
         let author = CommandAuthor::new(AuthorId(1), CommandRole::Viewer);
@@ -1145,7 +1145,7 @@ mod tests {
     #[test]
     fn last_write_wins_keeps_latest_lamport() {
         let registry = setup_registry();
-    let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
         let mut log = CommandLog::new(registry.clone(), verifier);
 
         let editor = CommandAuthor::new(AuthorId(7), CommandRole::Editor);
@@ -1184,7 +1184,7 @@ mod tests {
     #[test]
     fn reject_conflict_prevents_duplicates() {
         let registry = setup_registry();
-    let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
         let mut log = CommandLog::new(registry.clone(), verifier);
 
         let editor = CommandAuthor::new(AuthorId(3), CommandRole::Editor);
@@ -1206,7 +1206,7 @@ mod tests {
     #[test]
     fn merge_allows_multiple_entries() {
         let registry = setup_registry();
-    let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
         let mut log = CommandLog::new(registry.clone(), verifier);
 
         let editor = CommandAuthor::new(AuthorId(4), CommandRole::Editor);
@@ -1227,7 +1227,7 @@ mod tests {
     #[test]
     fn integrate_batch_replays_entries() {
         let registry = setup_registry();
-    let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
+        let verifier = Arc::new(NoopSignatureVerifier) as Arc<dyn SignatureVerifier>;
         let mut local = CommandLog::new(Arc::clone(&registry), Arc::clone(&verifier));
         let mut remote = CommandLog::new(registry, verifier);
 

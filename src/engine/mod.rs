@@ -848,9 +848,7 @@ impl Engine {
     }
 
     #[cfg(feature = "network-quic")]
-    fn receive_next_command_packet(
-        &mut self,
-    ) -> Result<Option<CommandPacket>, TransportError> {
+    fn receive_next_command_packet(&mut self) -> Result<Option<CommandPacket>, TransportError> {
         let session = match self.transport_session.as_ref() {
             Some(session) => session,
             None => return Ok(None),
@@ -1082,9 +1080,7 @@ impl Engine {
                     }
                 }
                 other => {
-                    log::debug!(
-                        "[commands] ignoring unhandled remote command type {other}"
-                    );
+                    log::debug!("[commands] ignoring unhandled remote command type {other}");
                 }
             }
         }
@@ -1179,7 +1175,7 @@ mod tests {
             original_position = transform.position;
         }
 
-    let translate = EntityTranslateCommand::new(handle, [0.5, -0.25, 0.0]);
+        let translate = EntityTranslateCommand::new(handle, [0.5, -0.25, 0.0]);
         let translate_entry = CommandEntry::new(
             CommandId::new(10, AuthorId(1)),
             1,
@@ -1225,7 +1221,7 @@ mod tests {
             .expect("transform present");
         assert!((rotated.rotation[3] - 0.707_106_77).abs() < 1e-5);
 
-    let scale = EntityScaleCommand::new(handle, [2.0, 1.0, 0.5]);
+        let scale = EntityScaleCommand::new(handle, [2.0, 1.0, 0.5]);
         let scale_entry = CommandEntry::new(
             CommandId::new(12, AuthorId(1)),
             3,

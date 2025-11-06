@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn null_pipeline_advances_frame_index() {
-    let backend: Box<dyn GpuBackend> = Box::new(NullGpuBackend);
+        let backend: Box<dyn GpuBackend> = Box::new(NullGpuBackend);
         let vr: Box<dyn VrBridge> = Box::new(NullVrBridge::default());
         let mut renderer = Renderer::new(RendererConfig::default(), backend, vr);
 

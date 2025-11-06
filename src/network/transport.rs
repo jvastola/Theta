@@ -1,4 +1,4 @@
-use super::{current_time_millis, TransportDiagnostics};
+use super::{TransportDiagnostics, current_time_millis};
 use crate::network::command_log::CommandPacket;
 use crate::network::wire;
 use ed25519_dalek::SigningKey;
@@ -502,8 +502,8 @@ fn parse_session_hello(
     let public_key_bytes: Vec<u8> = hello
         .client_public_key()
         .ok_or_else(|| TransportError::Handshake("missing client public key".into()))?
-    .iter()
-    .collect();
+        .iter()
+        .collect();
     if public_key_bytes.len() != 32 {
         return Err(TransportError::Handshake(
             "client public key must be 32 bytes".into(),
@@ -512,8 +512,8 @@ fn parse_session_hello(
     let nonce: Vec<u8> = hello
         .client_nonce()
         .ok_or_else(|| TransportError::Handshake("missing client nonce".into()))?
-    .iter()
-    .collect();
+        .iter()
+        .collect();
     Ok(SessionHelloData {
         capabilities,
         client_public_key: public_key_bytes.as_slice().try_into().unwrap(),
@@ -548,8 +548,8 @@ fn parse_session_ack(
     let public_key_bytes: Vec<u8> = ack
         .server_public_key()
         .ok_or_else(|| TransportError::Handshake("missing server public key".into()))?
-    .iter()
-    .collect();
+        .iter()
+        .collect();
     if public_key_bytes.len() != 32 {
         return Err(TransportError::Handshake(
             "server public key must be 32 bytes".into(),
@@ -558,8 +558,8 @@ fn parse_session_ack(
     let server_nonce: Vec<u8> = ack
         .server_nonce()
         .ok_or_else(|| TransportError::Handshake("missing server nonce".into()))?
-    .iter()
-    .collect();
+        .iter()
+        .collect();
 
     Ok(SessionAckData {
         session_id: ack.session_id(),
@@ -740,9 +740,7 @@ impl HeartbeatActor {
             loop {
                 tokio::time::sleep(config.interval).await;
                 sequence = sequence.wrapping_add(1);
-                let snapshot = send_handle_metrics
-                    .latest()
-                    .unwrap_or_default();
+                let snapshot = send_handle_metrics.latest().unwrap_or_default();
                 let payload = build_heartbeat_message(sequence, snapshot.clone());
                 if write_frame_locked(&control_send, payload).await.is_err() {
                     break;

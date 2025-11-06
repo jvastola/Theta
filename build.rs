@@ -74,7 +74,7 @@ fn compile_schema(
         .expect("failed to execute flatc");
 
     if !status.success() {
-    panic!("flatc failed for {schema}");
+        panic!("flatc failed for {schema}");
     }
 }
 
