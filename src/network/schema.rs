@@ -80,6 +80,7 @@ const STABLE_HASH_KEY_1: u64 = 0xabcdef0123456789;
 #[macro_export]
 macro_rules! register_component_types {
     ($($ty:ty),+ $(,)?) => {
+        #[cfg(not(target_family = "wasm"))]
         #[ctor::ctor]
         fn __theta_register_components() {
             $(
@@ -87,6 +88,13 @@ macro_rules! register_component_types {
                     $crate::network::schema::ComponentManifestEntry::of::<$ty>(),
                 );
             )+
+        }
+
+        #[cfg(target_family = "wasm")]
+        #[allow(dead_code)]
+        fn __theta_register_components() {
+            // wasm targets do not support global constructors; manifest registration
+            // is skipped and must be performed manually if needed at runtime.
         }
     };
 }
