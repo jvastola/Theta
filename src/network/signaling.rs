@@ -27,7 +27,7 @@ pub enum SignalingError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("websocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    WebSocket(Box<tokio_tungstenite::tungstenite::Error>),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("invalid signaling url: {0}")]
@@ -55,6 +55,12 @@ pub enum SignalingError {
     ConnectionClosed,
     #[error("signaling client not registered")]
     ClientNotRegistered,
+}
+
+impl From<tokio_tungstenite::tungstenite::Error> for SignalingError {
+    fn from(err: tokio_tungstenite::tungstenite::Error) -> Self {
+        SignalingError::WebSocket(Box::new(err))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
