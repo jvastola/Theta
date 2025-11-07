@@ -190,11 +190,58 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        let mut config = RendererConfig::default();
-        if cfg!(feature = "render-wgpu") {
-            config.backend = BackendKind::Wgpu;
+        Self::detect_render_mode()
+    }
+
+    /// Detect best available rendering mode: XR → Window → Headless
+    pub fn detect_render_mode() -> Self {
+        #[cfg(feature = "vr-openxr")]
+        {
+            // Try to initialize OpenXR runtime
+            log::info!("[engine] detecting XR runtime availability...");
+            if Self::is_xr_available() {
+                log::info!("[engine] XR runtime detected, using XR mode");
+                let mut config = RendererConfig::default();
+                config.backend = BackendKind::Wgpu;
+                config.mode = crate::render::RenderMode::Xr;
+                return Self::with_renderer_config(config);
+            }
+            log::info!("[engine] XR runtime not available, trying window mode");
         }
-        Self::with_renderer_config(config)
+
+        #[cfg(feature = "render-wgpu")]
+        {
+            // Fallback to window mode if wgpu is available
+            log::info!("[engine] using window rendering mode");
+            let mut config = RendererConfig::default();
+            config.backend = BackendKind::Wgpu;
+            config.mode = crate::render::RenderMode::Window;
+            return Self::with_renderer_config(config);
+        }
+
+        // Final fallback to headless mode (only reached if render-wgpu is disabled)
+        #[cfg(not(feature = "render-wgpu"))]
+        {
+            log::info!("[engine] using headless rendering mode");
+            let mut config = RendererConfig::default();
+            config.mode = crate::render::RenderMode::Headless;
+            Self::with_renderer_config(config)
+        }
+    }
+
+    #[cfg(feature = "vr-openxr")]
+    fn is_xr_available() -> bool {
+        // Try to create an OpenXR instance to check availability
+        match openxr::Entry::linked().available_layers() {
+            Ok(_) => {
+                // Check if we can create an instance
+                match openxr::Entry::linked().enumerate_extensions() {
+                    Ok(_) => true,
+                    Err(_) => false,
+                }
+            }
+            Err(_) => false,
+        }
     }
 
     pub fn with_renderer_config(config: RendererConfig) -> Self {
@@ -717,19 +764,27 @@ impl Engine {
     }
 
     fn build_renderer(config: RendererConfig) -> Renderer {
-        let backend = Self::create_backend(config.backend);
+        let backend = Self::create_backend(config.backend, config.mode);
         let vr: Box<dyn VrBridge> = Box::new(NullVrBridge::default());
         Renderer::new(config, backend, vr)
     }
 
-    fn create_backend(kind: BackendKind) -> Box<dyn GpuBackend> {
-        match kind {
-            BackendKind::Null => Box::new(NullGpuBackend),
-            BackendKind::Wgpu => {
+    fn create_backend(kind: BackendKind, mode: crate::render::RenderMode) -> Box<dyn GpuBackend> {
+        use crate::render::RenderMode;
+        
+        match (kind, mode) {
+            (BackendKind::Null, _) | (_, RenderMode::Headless) => {
+                log::info!("[engine] initialized Null backend");
+                Box::new(NullGpuBackend)
+            }
+            (BackendKind::Wgpu, RenderMode::Xr) => {
                 #[cfg(feature = "render-wgpu")]
                 {
                     match crate::render::wgpu_backend::WgpuBackend::initialize() {
-                        Ok(backend) => Box::new(backend) as Box<dyn GpuBackend>,
+                        Ok(backend) => {
+                            log::info!("[engine] initialized WGPU backend for XR mode");
+                            Box::new(backend) as Box<dyn GpuBackend>
+                        }
                         Err(err) => {
                             eprintln!(
                                 "[engine] failed to initialize wgpu backend ({err}); falling back to Null"
@@ -743,6 +798,42 @@ impl Engine {
                 {
                     eprintln!(
                         "[engine] wgpu backend requested but 'render-wgpu' feature is disabled; falling back to Null"
+                    );
+                    Box::new(NullGpuBackend)
+                }
+            }
+            (BackendKind::Wgpu, RenderMode::Window) => {
+                #[cfg(feature = "render-wgpu")]
+                {
+                    use crate::render::window::{WindowConfig, StereoMode};
+                    
+                    let window_config = WindowConfig {
+                        title: "Theta Engine - Desktop Mode".to_string(),
+                        width: 1280,
+                        height: 720,
+                        resizable: true,
+                        color_space: crate::render::ColorSpace::Srgb,
+                        stereo_mode: StereoMode::SideBySide, // Default to stereo for XR testing
+                    };
+                    
+                    match crate::render::WindowBackend::initialize(window_config) {
+                        Ok(backend) => {
+                            log::info!("[engine] initialized Window backend (stereo mode)");
+                            Box::new(backend) as Box<dyn GpuBackend>
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "[engine] failed to initialize window backend ({err}); falling back to Null"
+                            );
+                            Box::new(NullGpuBackend)
+                        }
+                    }
+                }
+
+                #[cfg(not(feature = "render-wgpu"))]
+                {
+                    eprintln!(
+                        "[engine] window backend requested but 'render-wgpu' feature is disabled; falling back to Null"
                     );
                     Box::new(NullGpuBackend)
                 }

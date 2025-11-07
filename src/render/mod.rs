@@ -8,12 +8,24 @@ use std::sync::Arc;
 #[cfg(feature = "render-wgpu")]
 pub mod window;
 #[cfg(feature = "render-wgpu")]
-pub use window::{WindowApp, WindowAppTrait, WindowBackend, WindowConfig, WindowEventLoop};
+pub use window::{StereoMode, WindowApp, WindowAppTrait, WindowBackend, WindowConfig, WindowEventLoop};
+
+pub use RenderMode as Mode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     Null,
     Wgpu,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    /// XR/VR rendering mode with stereo views
+    Xr,
+    /// Desktop window rendering mode (fallback)
+    Window,
+    /// Headless mode for testing
+    Headless,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +37,7 @@ pub enum ColorSpace {
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
     pub backend: BackendKind,
+    pub mode: RenderMode,
     pub enable_vsync: bool,
     pub color_space: ColorSpace,
 }
@@ -33,6 +46,7 @@ impl Default for RendererConfig {
     fn default() -> Self {
         Self {
             backend: BackendKind::Null,
+            mode: RenderMode::Headless,
             enable_vsync: true,
             color_space: ColorSpace::Srgb,
         }
