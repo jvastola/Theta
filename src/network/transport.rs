@@ -44,6 +44,10 @@ const FRAME_HEADER_LEN: usize = 4;
 const HANDSHAKE_CAPACITY: usize = 1024;
 const FRAME_KIND_COMMAND_PACKET: u8 = 1;
 const FRAME_KIND_COMPONENT_DELTA: u8 = 2;
+const FRAME_KIND_MASK: u8 = 0x7F;
+const FRAME_FLAG_ZSTD: u8 = 0x80;
+const MIN_ZSTD_FRAME_BYTES: usize = 512;
+const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 const VOICE_FRAME_HEADER_BYTES: usize = 8 + 8 + 4;
 const LOCAL_SPEAKER_TAG: &str = "local";
 const REMOTE_SPEAKER_TAG: &str = "remote";
@@ -414,10 +418,12 @@ impl TransportSession {
 
         let send_start = Instant::now();
         let mut total_bytes = 0usize;
+        let mut compression_ratio = 1.0f32;
         for packet in packets {
             let frame = encode_command_packet_frame(packet)?;
-            total_bytes = total_bytes.saturating_add(frame.len());
-            self.replication.write_frame(&frame).await?;
+            compression_ratio = compression_ratio.max(frame.compression_ratio);
+            total_bytes = total_bytes.saturating_add(frame.bytes.len());
+            self.replication.write_frame(&frame.bytes).await?;
         }
 
         let sent = packets.len() as u64;
@@ -427,7 +433,7 @@ impl TransportSession {
             m.packets_sent = m.packets_sent.saturating_add(sent);
             m.command_packets_sent = m.command_packets_sent.saturating_add(sent);
             if sent > 0 {
-                m.compression_ratio = 1.0;
+                m.compression_ratio = compression_ratio;
             }
             if total_bytes > 0 {
                 let bandwidth = if elapsed > 0.0 {
@@ -658,12 +664,22 @@ impl WebRtcTransport {
 
         let send_start = Instant::now();
         let mut total_bytes = 0usize;
+        let mut compression_ratio = 1.0f32;
 
         for packet in packets {
+            if packet.payload.len() > MAX_COMMAND_PACKET_BYTES {
+                return Err(TransportError::WebRtc(format!(
+                    "payload exceeds maximum message size: {} > {}",
+                    packet.payload.len(),
+                    MAX_COMMAND_PACKET_BYTES
+                )));
+            }
+
             let frame = encode_command_packet_frame(packet)?;
-            let frame_len = frame.len();
+            compression_ratio = compression_ratio.max(frame.compression_ratio);
+            let frame_len = frame.bytes.len();
             total_bytes = total_bytes.saturating_add(frame_len);
-            let payload = Bytes::from(frame);
+            let payload = Bytes::from(frame.bytes);
             self.command_channel
                 .send(&payload)
                 .await
@@ -677,7 +693,7 @@ impl WebRtcTransport {
             m.packets_sent = m.packets_sent.saturating_add(sent);
             m.command_packets_sent = m.command_packets_sent.saturating_add(sent);
             if sent > 0 {
-                m.compression_ratio = m.compression_ratio.max(1.0);
+                m.compression_ratio = compression_ratio;
             }
             if total_bytes > 0 {
                 let bandwidth = if elapsed > 0.0 {
@@ -1698,22 +1714,56 @@ enum DecodedReplicationFrame {
     Unknown(u8, Vec<u8>),
 }
 
-fn encode_command_packet_frame(packet: &CommandPacket) -> Result<Vec<u8>, TransportError> {
+struct EncodedReplicationFrame {
+    bytes: Vec<u8>,
+    compression_ratio: f32,
+}
+
+fn encode_command_packet_frame(
+    packet: &CommandPacket,
+) -> Result<EncodedReplicationFrame, TransportError> {
     let payload =
         serde_json::to_vec(packet).map_err(|err| TransportError::Serialization(err.to_string()))?;
-    Ok(encode_framed_payload(FRAME_KIND_COMMAND_PACKET, payload))
+    encode_framed_payload(FRAME_KIND_COMMAND_PACKET, payload)
 }
 
 #[cfg(test)]
 fn encode_component_delta_frame(bytes: &[u8]) -> Vec<u8> {
     encode_framed_payload(FRAME_KIND_COMPONENT_DELTA, bytes.to_vec())
+        .expect("component delta frame encodes")
+        .bytes
 }
 
-fn encode_framed_payload(kind: u8, payload: Vec<u8>) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(1 + payload.len());
-    frame.push(kind);
-    frame.extend_from_slice(&payload);
-    frame
+fn encode_framed_payload(
+    kind: u8,
+    payload: Vec<u8>,
+) -> Result<EncodedReplicationFrame, TransportError> {
+    let (frame_kind, frame_payload, compression_ratio) = compress_frame_payload(kind, payload)?;
+    let mut bytes = Vec::with_capacity(1 + frame_payload.len());
+    bytes.push(frame_kind);
+    bytes.extend_from_slice(&frame_payload);
+    Ok(EncodedReplicationFrame {
+        bytes,
+        compression_ratio,
+    })
+}
+
+fn compress_frame_payload(
+    kind: u8,
+    payload: Vec<u8>,
+) -> Result<(u8, Vec<u8>, f32), TransportError> {
+    if payload.len() < MIN_ZSTD_FRAME_BYTES {
+        return Ok((kind, payload, 1.0));
+    }
+
+    let compressed = zstd::stream::encode_all(payload.as_slice(), ZSTD_COMPRESSION_LEVEL)
+        .map_err(|err| TransportError::Serialization(err.to_string()))?;
+    if compressed.len() >= payload.len() {
+        return Ok((kind, payload, 1.0));
+    }
+
+    let compression_ratio = payload.len() as f32 / compressed.len() as f32;
+    Ok((kind | FRAME_FLAG_ZSTD, compressed, compression_ratio))
 }
 
 fn decode_replication_frame(bytes: &[u8]) -> Result<DecodedReplicationFrame, TransportError> {
@@ -1723,15 +1773,25 @@ fn decode_replication_frame(bytes: &[u8]) -> Result<DecodedReplicationFrame, Tra
         ));
     }
 
-    let payload = bytes[1..].to_vec();
-    match bytes[0] {
+    let frame_kind = bytes[0];
+    let kind = frame_kind & FRAME_KIND_MASK;
+    let known_kind = matches!(kind, FRAME_KIND_COMMAND_PACKET | FRAME_KIND_COMPONENT_DELTA);
+    let compressed = known_kind && frame_kind & FRAME_FLAG_ZSTD != 0;
+    let payload = if compressed {
+        zstd::stream::decode_all(&bytes[1..])
+            .map_err(|err| TransportError::Serialization(err.to_string()))?
+    } else {
+        bytes[1..].to_vec()
+    };
+
+    match kind {
         FRAME_KIND_COMMAND_PACKET => {
             let packet = serde_json::from_slice::<CommandPacket>(&payload)
                 .map_err(|err| TransportError::Serialization(err.to_string()))?;
             Ok(DecodedReplicationFrame::Command(packet))
         }
         FRAME_KIND_COMPONENT_DELTA => Ok(DecodedReplicationFrame::ComponentDelta(payload)),
-        other => Ok(DecodedReplicationFrame::Unknown(other, payload)),
+        _ => Ok(DecodedReplicationFrame::Unknown(frame_kind, payload)),
     }
 }
 
@@ -2632,6 +2692,43 @@ mod tests {
                 assert_eq!(kind, 0xFE);
                 assert_eq!(bytes, payload);
             }
+            other => panic!("unexpected frame variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replication_frame_bypasses_compression_for_small_payloads() {
+        let encoded = encode_framed_payload(FRAME_KIND_COMPONENT_DELTA, vec![1, 2, 3, 4])
+            .expect("encode frame");
+
+        assert_eq!(encoded.bytes[0], FRAME_KIND_COMPONENT_DELTA);
+        assert_eq!(encoded.compression_ratio, 1.0);
+        match decode_replication_frame(&encoded.bytes).expect("decode frame") {
+            DecodedReplicationFrame::ComponentDelta(bytes) => assert_eq!(bytes, vec![1, 2, 3, 4]),
+            other => panic!("unexpected frame variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replication_frame_compresses_repetitive_command_payloads() {
+        let packet = CommandPacket {
+            sequence: 99,
+            nonce: 7,
+            timestamp_ms: current_time_millis(),
+            payload: vec![42u8; 8 * 1024],
+        };
+
+        let encoded = encode_command_packet_frame(&packet).expect("encode frame");
+
+        assert_eq!(
+            encoded.bytes[0] & FRAME_KIND_MASK,
+            FRAME_KIND_COMMAND_PACKET
+        );
+        assert_ne!(encoded.bytes[0] & FRAME_FLAG_ZSTD, 0);
+        assert!(encoded.compression_ratio > 1.0);
+
+        match decode_replication_frame(&encoded.bytes).expect("decode frame") {
+            DecodedReplicationFrame::Command(decoded) => assert_eq!(decoded, packet),
             other => panic!("unexpected frame variant: {other:?}"),
         }
     }

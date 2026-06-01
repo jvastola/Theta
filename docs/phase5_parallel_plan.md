@@ -5,7 +5,7 @@
 **Audience:** Networking, Systems, Editor, Platform/Infra teams
 
 ## Context
-- Phase 4 (Command Log & Conflict Resolution) is complete. Metrics, telemetry, and extended editor command vocabulary are merged and validated (103 tests passing with all features as of Nov 6).
+- Phase 4 (Command Log & Conflict Resolution) is complete. Metrics, telemetry, and extended editor command vocabulary are merged and validated (113 tests passing with all features as of May 31, 2026).
 - Phase 5 objectives focus on production hardening: securing the command pipeline, strengthening transports, adding performance instrumentation, and preparing documentation for broader team onboarding.
 - The roadmap accelerates into overlapping workstreams so that Networking/Security, Systems/Telemetry, Editor Tools, and Platform/Infra can execute in parallel while sharing common integration checkpoints.
 - Voice subsystem scaffolding (passthrough codec, jitter buffer, RMS VAD, session metrics) is now in place to unblock Opus/WebRTC integration work.
@@ -22,7 +22,7 @@
 |------------|------|-------|--------------|---------------------|
 | **Security & Integrity** | Networking & Security | Nonce replay protection, per-author rate limiting, payload size guards, signature rejection telemetry | Phase 4 command pipeline, QUIC transport | `CommandPacket` nonce field + verifier ✅, rate limiter with configurable thresholds ✅, 64 KiB guard + telemetry ✅ |
 | **Transport Resilience** | Networking & Security + Platform | WebRTC data-channel fallback, multi-protocol convergence suite, soak test harness | Security workstream for shared metrics; CI infra | Browser peer prototype, convergence test covering QUIC/WebRTC, nightly soak task in CI |
-| **Compression & Benchmarking** | Systems & Telemetry | Zstd compression for commands, telemetry export to CSV/Parquet, nightly perf benchmarks | Security (payload guard) to finalize envelope | Compression toggle w/ metrics, benchmark harness w/ baseline report, telemetry artifact publishing |
+| **Compression & Benchmarking** | Systems & Telemetry | Zstd compression for commands, telemetry export to CSV/Parquet, nightly perf benchmarks | Security (payload guard) to finalize envelope | Zstd frame compression + metrics ✅, benchmark harness w/ baseline report, telemetry artifact publishing |
 | **Editor Protocol & Tooling** | Editor Tools | Publish command protocol schema, update tool docs, plan Phase 6 mesh data flow | Phase 4 command vocab, Systems telemetry fields | `editor_command_schema.json` + Markdown spec, PolySketch tool matrix, mesh command backlog grooming |
 | **DevOps & Documentation** | Platform/Infra | Update architecture diagrams, operator runbooks, task automation | Inputs from all workstreams | Revamped docs/architecture diagrams, updated runbooks, consolidated Phase 5 status dashboard |
 
@@ -43,13 +43,15 @@
 - [ ] **CI Enforcement:** All new security features require passing tests before merge (CI gate).
 
 ### Systems & Telemetry
-- [ ] Implement Zstd compression adapter with heuristics for small payload bypass.
-- [ ] Capture compression ratio, compression/decompression latency in telemetry overlay.
+- [x] Implement Zstd compression adapter with heuristics for small payload bypass.
+- [x] Capture compression ratio in transport telemetry.
+- [ ] Capture compression/decompression latency in telemetry overlay.
 - [ ] Stand up nightly perf benchmark (command append flood, remote apply, telemetry export).
 - [ ] Ship telemetry export job writing CSV into `target/metrics/` for CI artifact capture.
 
 #### Test Suite Enhancements (Systems & Telemetry)
-- [ ] **Compression:** Add regression tests for compression ratio, latency, and bypass threshold logic. Validate decompression correctness and error handling.
+- [x] **Compression:** Add regression tests for compression ratio, bypass threshold logic, decompression correctness, and unknown-frame compatibility.
+- [ ] **Compression Latency:** Add regression tests for compression/decompression latency budgets.
 - [ ] **Benchmarking:** Automate performance benchmarks (command throughput, latency, memory) with trend tracking and failure alerts.
 - [ ] **Telemetry Export:** Test CSV/Parquet export jobs for schema correctness and artifact presence in CI.
 - [ ] **Metrics Coverage:** Ensure all new telemetry fields have corresponding test assertions.

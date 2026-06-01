@@ -201,9 +201,11 @@ impl Engine {
             log::info!("[engine] detecting XR runtime availability...");
             if Self::is_xr_available() {
                 log::info!("[engine] XR runtime detected, using XR mode");
-                let mut config = RendererConfig::default();
-                config.backend = BackendKind::Wgpu;
-                config.mode = crate::render::RenderMode::Xr;
+                let config = RendererConfig {
+                    backend: BackendKind::Wgpu,
+                    mode: crate::render::RenderMode::Xr,
+                    ..Default::default()
+                };
                 return Self::with_renderer_config(config);
             }
             log::info!("[engine] XR runtime not available, trying window mode");
@@ -213,10 +215,12 @@ impl Engine {
         {
             // Fallback to window mode if wgpu is available
             log::info!("[engine] using window rendering mode");
-            let mut config = RendererConfig::default();
-            config.backend = BackendKind::Wgpu;
-            config.mode = crate::render::RenderMode::Window;
-            return Self::with_renderer_config(config);
+            let config = RendererConfig {
+                backend: BackendKind::Wgpu,
+                mode: crate::render::RenderMode::Window,
+                ..Default::default()
+            };
+            Self::with_renderer_config(config)
         }
 
         // Final fallback to headless mode (only reached if render-wgpu is disabled)
@@ -231,14 +235,18 @@ impl Engine {
 
     #[cfg(feature = "vr-openxr")]
     fn is_xr_available() -> bool {
-        // Try to create an OpenXR instance to check availability
-        match openxr::Entry::linked().available_layers() {
+        // Safety: loading the OpenXR loader only probes process-local runtime state and reports
+        // loader/runtime absence as an error.
+        let entry = match unsafe { openxr::Entry::load() } {
+            Ok(entry) => entry,
+            Err(_) => return false,
+        };
+
+        // Try to enumerate runtime properties to check availability.
+        match entry.enumerate_layers() {
             Ok(_) => {
                 // Check if we can create an instance
-                match openxr::Entry::linked().enumerate_extensions() {
-                    Ok(_) => true,
-                    Err(_) => false,
-                }
+                entry.enumerate_extensions().is_ok()
             }
             Err(_) => false,
         }
@@ -771,7 +779,7 @@ impl Engine {
 
     fn create_backend(kind: BackendKind, mode: crate::render::RenderMode) -> Box<dyn GpuBackend> {
         use crate::render::RenderMode;
-        
+
         match (kind, mode) {
             (BackendKind::Null, _) | (_, RenderMode::Headless) => {
                 log::info!("[engine] initialized Null backend");
@@ -805,8 +813,8 @@ impl Engine {
             (BackendKind::Wgpu, RenderMode::Window) => {
                 #[cfg(feature = "render-wgpu")]
                 {
-                    use crate::render::window::{WindowConfig, StereoMode};
-                    
+                    use crate::render::window::{StereoMode, WindowConfig};
+
                     let window_config = WindowConfig {
                         title: "Theta Engine - Desktop Mode".to_string(),
                         width: 1280,
@@ -815,7 +823,7 @@ impl Engine {
                         color_space: crate::render::ColorSpace::Srgb,
                         stereo_mode: StereoMode::SideBySide, // Default to stereo for XR testing
                     };
-                    
+
                     match crate::render::WindowBackend::initialize(window_config) {
                         Ok(backend) => {
                             log::info!("[engine] initialized Window backend (stereo mode)");

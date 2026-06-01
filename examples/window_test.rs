@@ -25,7 +25,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run(move |event_loop| {
         WindowApp::new(event_loop, config.clone())
             .map(|app| Box::new(app) as Box<dyn theta_engine::render::window::WindowAppTrait>)
-            .map_err(|e| e.into())
     })?;
 
     Ok(())

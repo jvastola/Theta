@@ -8,7 +8,9 @@ use std::sync::Arc;
 #[cfg(feature = "render-wgpu")]
 pub mod window;
 #[cfg(feature = "render-wgpu")]
-pub use window::{StereoMode, WindowApp, WindowAppTrait, WindowBackend, WindowConfig, WindowEventLoop};
+pub use window::{
+    StereoMode, WindowApp, WindowAppTrait, WindowBackend, WindowConfig, WindowEventLoop,
+};
 
 pub use RenderMode as Mode;
 

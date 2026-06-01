@@ -2,7 +2,7 @@
 
 Theta Engine is a Rust-native VR-first game engine & mesh authoring platform focused on high-performance rendering, ergonomic mesh tools, and networked collaboration. This repository contains architecture, scaffolding, and tests for the engine and editor runtime.
 
-## Current Status (November 5, 2025)
+## Current Status (May 31, 2026)
 
 **Phase 4:** Complete (Command Log & Conflict Resolution)  
 **Phase 5:** In Flight (Production Hardening & Transport Resilience)
@@ -16,9 +16,9 @@ Theta Engine is a Rust-native VR-first game engine & mesh authoring platform foc
 ### 🔄 In Progress (Nov 8-21):
 - Security hardening: nonce replay protection, token-bucket rate limiting, payload guards
 - Transport resilience: WebRTC command transport fallback, mixed QUIC/WebRTC convergence tests
-- Compression & telemetry: Zstd benchmarking, transport diagnostics surfacing active transport kind
+- Compression & telemetry: Zstd frame compression is live; benchmarking and interest management remain
 
-**Metrics:** 74 tests passing (68 unit + 6 integration), 0 failures, ~11,000 LOC total — 86 tests when running `cargo test --features network-quic`
+**Metrics:** 113 tests passing with `cargo test --all-features` (105 unit + 8 integration), 0 failures. `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings` pass.
 
 ## Vision
 - VR-native editor inspired by PolySketch/Google Blocks with intuitive mesh creation, duplication, and undo/redo.
@@ -42,6 +42,7 @@ Each subsystem will be designed as a distinct module crate to allow modular deve
 - Renderer ships with a null backend plus a feature-gated `wgpu` backend that reuses per-eye swapchain textures and forwards GPU submissions to the VR bridge.
 - VR layer provides a simulated input provider by default, with a feature-gated OpenXR provider (`vr-openxr`) that loads the runtime when available.
 - QUIC transport (`network-quic`) establishes Ed25519-backed handshakes with heartbeat telemetry feeding frame diagnostics.
+- WebRTC data-channel fallback carries command and voice packets; command/replication frames use Zstd compression with a small-payload bypass.
 
 ## Immediate Roadmap (November 2025)
 

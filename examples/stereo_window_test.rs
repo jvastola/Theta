@@ -1,6 +1,6 @@
+use std::env;
 /// Test stereoscopic window rendering with different viewport layouts
 use theta_engine::render::{StereoMode, WindowApp, WindowConfig, WindowEventLoop};
-use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -32,8 +32,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = WindowConfig {
         title: title.to_string(),
-        width: if stereo_mode == StereoMode::SideBySide { 1600 } else { 800 },
-        height: if stereo_mode == StereoMode::TopBottom { 1600 } else { 800 },
+        width: if stereo_mode == StereoMode::SideBySide {
+            1600
+        } else {
+            800
+        },
+        height: if stereo_mode == StereoMode::TopBottom {
+            1600
+        } else {
+            800
+        },
         resizable: true,
         color_space: theta_engine::render::ColorSpace::Srgb,
         stereo_mode,

@@ -1,8 +1,10 @@
-/// Desktop window rendering backend for macOS/Linux/Windows testing
-/// Provides a fallback render target when XR hardware is unavailable
+//! Desktop window rendering backend for macOS/Linux/Windows testing.
+//! Provides a fallback render target when XR hardware is unavailable.
 
 #[cfg(feature = "render-wgpu")]
-use super::{ColorSpace, FrameInputs, GpuBackend, RenderError, RenderResult, RenderSubmission, WgpuContext};
+use super::{
+    ColorSpace, FrameInputs, GpuBackend, RenderError, RenderResult, RenderSubmission, WgpuContext,
+};
 #[cfg(feature = "render-wgpu")]
 use crate::vr::{SurfaceHandle, VrFrameSubmission, VrViewConfig};
 #[cfg(feature = "render-wgpu")]
@@ -115,7 +117,7 @@ struct WindowSurface {
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     window: Arc<Window>,
-    depth_texture: wgpu::Texture,
+    _depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
 }
 
@@ -172,10 +174,12 @@ impl WindowBackend {
     }
 
     fn create_geometry_pipeline(&self, surface_format: wgpu::TextureFormat) -> GeometryPipeline {
-        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Theta Geometry Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/geometry.wgsl").into()),
-        });
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Theta Geometry Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/geometry.wgsl").into()),
+            });
 
         // Create uniform buffer
         let uniform_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -186,19 +190,21 @@ impl WindowBackend {
         });
 
         // Create bind group layout
-        let bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Theta Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Theta Bind Group Layout"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
 
         // Create bind group
         let uniform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -211,52 +217,55 @@ impl WindowBackend {
         });
 
         let render_pipeline_layout =
-            self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Theta Geometry Pipeline Layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Theta Geometry Pipeline Layout"),
+                    bind_group_layouts: &[&bind_group_layout],
+                    push_constant_ranges: &[],
+                });
 
-        let render_pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Theta Geometry Render Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[Vertex::desc()],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back), // Re-enable back-face culling
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-        });
+        let render_pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Theta Geometry Render Pipeline"),
+                layout: Some(&render_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: "vs_main",
+                    buffers: &[Vertex::desc()],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back), // Re-enable back-face culling
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+            });
 
         // Create a colored cube
         // Each face has a different color: front=red, back=cyan, left=green, right=magenta, top=blue, bottom=yellow
@@ -267,31 +276,31 @@ impl WindowBackend {
             Vertex { position: [ 0.5, -0.5,  0.5], color: [1.0, 0.0, 0.0] },
             Vertex { position: [ 0.5,  0.5,  0.5], color: [1.0, 0.0, 0.0] },
             Vertex { position: [-0.5,  0.5,  0.5], color: [1.0, 0.0, 0.0] },
-            
+
             // Back face (cyan) - facing -Z
             Vertex { position: [ 0.5, -0.5, -0.5], color: [0.0, 1.0, 1.0] },
             Vertex { position: [-0.5, -0.5, -0.5], color: [0.0, 1.0, 1.0] },
             Vertex { position: [-0.5,  0.5, -0.5], color: [0.0, 1.0, 1.0] },
             Vertex { position: [ 0.5,  0.5, -0.5], color: [0.0, 1.0, 1.0] },
-            
+
             // Left face (green) - facing -X
             Vertex { position: [-0.5, -0.5, -0.5], color: [0.0, 1.0, 0.0] },
             Vertex { position: [-0.5, -0.5,  0.5], color: [0.0, 1.0, 0.0] },
             Vertex { position: [-0.5,  0.5,  0.5], color: [0.0, 1.0, 0.0] },
             Vertex { position: [-0.5,  0.5, -0.5], color: [0.0, 1.0, 0.0] },
-            
+
             // Right face (magenta) - facing +X
             Vertex { position: [ 0.5, -0.5,  0.5], color: [1.0, 0.0, 1.0] },
             Vertex { position: [ 0.5, -0.5, -0.5], color: [1.0, 0.0, 1.0] },
             Vertex { position: [ 0.5,  0.5, -0.5], color: [1.0, 0.0, 1.0] },
             Vertex { position: [ 0.5,  0.5,  0.5], color: [1.0, 0.0, 1.0] },
-            
+
             // Top face (blue) - facing +Y
             Vertex { position: [-0.5,  0.5,  0.5], color: [0.0, 0.0, 1.0] },
             Vertex { position: [ 0.5,  0.5,  0.5], color: [0.0, 0.0, 1.0] },
             Vertex { position: [ 0.5,  0.5, -0.5], color: [0.0, 0.0, 1.0] },
             Vertex { position: [-0.5,  0.5, -0.5], color: [0.0, 0.0, 1.0] },
-            
+
             // Bottom face (yellow) - facing -Y
             Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 1.0, 0.0] },
             Vertex { position: [ 0.5, -0.5, -0.5], color: [1.0, 1.0, 0.0] },
@@ -315,17 +324,21 @@ impl WindowBackend {
             20, 21, 22,  22, 23, 20,
         ];
 
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Theta Vertex Buffer"),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Theta Vertex Buffer"),
+                contents: bytemuck::cast_slice(vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
 
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Theta Index Buffer"),
-            contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Theta Index Buffer"),
+                contents: bytemuck::cast_slice(indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
 
         GeometryPipeline {
             render_pipeline,
@@ -394,7 +407,7 @@ impl WindowBackend {
             surface,
             surface_config,
             window,
-            depth_texture,
+            _depth_texture: depth_texture,
             depth_view,
         });
 
@@ -424,19 +437,35 @@ impl WindowBackend {
         self.surface.as_ref().map(|s| s.window.as_ref())
     }
 
-    fn create_view_projection_matrix(&self, elapsed_seconds: f32, eye_offset: f32, aspect_ratio: f32) -> [[f32; 4]; 4] {
+    fn create_view_projection_matrix(
+        &self,
+        elapsed_seconds: f32,
+        eye_offset: f32,
+        aspect_ratio: f32,
+    ) -> [[f32; 4]; 4] {
         // Simple rotation in clip space
         let angle = elapsed_seconds * 0.5;
         let c = angle.cos();
         let s = angle.sin();
         let scale = 0.4;
-        
-        // Rotate around Y axis and scale down
+        let x_scale = if aspect_ratio > 1.0 {
+            scale / aspect_ratio
+        } else {
+            scale
+        };
+        let y_scale = if aspect_ratio < 1.0 {
+            scale * aspect_ratio
+        } else {
+            scale
+        };
+        let eye_shift = eye_offset * 0.06;
+
+        // Rotate around Y axis, apply aspect correction, and separate stereo eye views.
         [
-            [c * scale, 0.0, s * scale, 0.0],
-            [0.0, scale, 0.0, 0.0],
+            [c * x_scale, 0.0, s * x_scale, 0.0],
+            [0.0, y_scale, 0.0, 0.0],
             [-s * scale, 0.0, c * scale, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
+            [eye_shift, 0.0, 0.0, 1.0],
         ]
     }
 }
@@ -457,9 +486,7 @@ impl GpuBackend for WindowBackend {
             log::warn!("[render] window backend not yet attached to window, skipping frame");
             return Ok(RenderSubmission {
                 frame_index: inputs.frame_index,
-                vr_submission: VrFrameSubmission {
-                    surfaces: vec![],
-                },
+                vr_submission: VrFrameSubmission { surfaces: vec![] },
                 gpu_submission: None,
             });
         }
@@ -490,7 +517,7 @@ impl GpuBackend for WindowBackend {
             });
 
         let size = surface.window.inner_size();
-        
+
         // Single render pass for all viewports to avoid clearing between them
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -523,15 +550,20 @@ impl GpuBackend for WindowBackend {
             // Set pipeline once
             render_pass.set_pipeline(&geometry.render_pipeline);
             render_pass.set_vertex_buffer(0, geometry.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(geometry.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            
+            render_pass
+                .set_index_buffer(geometry.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+
             // Render to each viewport with appropriate eye offset
             match self.config.stereo_mode {
                 StereoMode::Mono => {
                     let aspect_ratio = size.width as f32 / size.height as f32;
-                    
+
                     // No eye separation for mono
-                    let matrix = self.create_view_projection_matrix(inputs.elapsed_seconds, 0.0, aspect_ratio);
+                    let matrix = self.create_view_projection_matrix(
+                        inputs.elapsed_seconds,
+                        0.0,
+                        aspect_ratio,
+                    );
                     let uniforms = Uniforms {
                         view_projection: matrix,
                     };
@@ -540,7 +572,7 @@ impl GpuBackend for WindowBackend {
                         0,
                         bytemuck::cast_slice(&[uniforms]),
                     );
-                    
+
                     render_pass.set_bind_group(0, &geometry.uniform_bind_group, &[]);
                     render_pass.set_viewport(
                         0.0,
@@ -555,9 +587,13 @@ impl GpuBackend for WindowBackend {
                 StereoMode::SideBySide => {
                     let half_width = size.width / 2;
                     let aspect_ratio = half_width as f32 / size.height as f32;
-                    
+
                     // Left eye viewport (negative offset)
-                    let left_matrix = self.create_view_projection_matrix(inputs.elapsed_seconds, -1.0, aspect_ratio);
+                    let left_matrix = self.create_view_projection_matrix(
+                        inputs.elapsed_seconds,
+                        -1.0,
+                        aspect_ratio,
+                    );
                     let left_uniforms = Uniforms {
                         view_projection: left_matrix,
                     };
@@ -566,7 +602,7 @@ impl GpuBackend for WindowBackend {
                         0,
                         bytemuck::cast_slice(&[left_uniforms]),
                     );
-                    
+
                     render_pass.set_bind_group(0, &geometry.uniform_bind_group, &[]);
                     render_pass.set_viewport(
                         0.0,
@@ -577,9 +613,13 @@ impl GpuBackend for WindowBackend {
                         1.0,
                     );
                     render_pass.draw_indexed(0..geometry.index_count, 0, 0..1);
-                    
+
                     // Right eye viewport (positive offset)
-                    let right_matrix = self.create_view_projection_matrix(inputs.elapsed_seconds, 1.0, aspect_ratio);
+                    let right_matrix = self.create_view_projection_matrix(
+                        inputs.elapsed_seconds,
+                        1.0,
+                        aspect_ratio,
+                    );
                     let right_uniforms = Uniforms {
                         view_projection: right_matrix,
                     };
@@ -588,7 +628,7 @@ impl GpuBackend for WindowBackend {
                         0,
                         bytemuck::cast_slice(&[right_uniforms]),
                     );
-                    
+
                     render_pass.set_bind_group(0, &geometry.uniform_bind_group, &[]);
                     render_pass.set_viewport(
                         half_width as f32,
@@ -603,9 +643,13 @@ impl GpuBackend for WindowBackend {
                 StereoMode::TopBottom => {
                     let half_height = size.height / 2;
                     let aspect_ratio = size.width as f32 / half_height as f32;
-                    
+
                     // Left eye viewport (top, negative offset)
-                    let left_matrix = self.create_view_projection_matrix(inputs.elapsed_seconds, -1.0, aspect_ratio);
+                    let left_matrix = self.create_view_projection_matrix(
+                        inputs.elapsed_seconds,
+                        -1.0,
+                        aspect_ratio,
+                    );
                     let left_uniforms = Uniforms {
                         view_projection: left_matrix,
                     };
@@ -614,7 +658,7 @@ impl GpuBackend for WindowBackend {
                         0,
                         bytemuck::cast_slice(&[left_uniforms]),
                     );
-                    
+
                     render_pass.set_bind_group(0, &geometry.uniform_bind_group, &[]);
                     render_pass.set_viewport(
                         0.0,
@@ -625,9 +669,13 @@ impl GpuBackend for WindowBackend {
                         1.0,
                     );
                     render_pass.draw_indexed(0..geometry.index_count, 0, 0..1);
-                    
+
                     // Right eye viewport (bottom, positive offset)
-                    let right_matrix = self.create_view_projection_matrix(inputs.elapsed_seconds, 1.0, aspect_ratio);
+                    let right_matrix = self.create_view_projection_matrix(
+                        inputs.elapsed_seconds,
+                        1.0,
+                        aspect_ratio,
+                    );
                     let right_uniforms = Uniforms {
                         view_projection: right_matrix,
                     };
@@ -636,7 +684,7 @@ impl GpuBackend for WindowBackend {
                         0,
                         bytemuck::cast_slice(&[right_uniforms]),
                     );
-                    
+
                     render_pass.set_bind_group(0, &geometry.uniform_bind_group, &[]);
                     render_pass.set_viewport(
                         0.0,
@@ -685,8 +733,8 @@ pub struct WindowEventLoop {
 #[cfg(feature = "render-wgpu")]
 impl WindowEventLoop {
     pub fn new() -> RenderResult<Self> {
-        let event_loop = EventLoop::new()
-            .map_err(|_| RenderError::Backend("failed to create event loop"))?;
+        let event_loop =
+            EventLoop::new().map_err(|_| RenderError::Backend("failed to create event loop"))?;
         Ok(Self { event_loop })
     }
 
@@ -699,35 +747,31 @@ impl WindowEventLoop {
         let mut app: Option<Box<dyn WindowAppTrait>> = None;
 
         self.event_loop
-            .run(move |event, event_loop_target| {
-                match event {
-                    Event::NewEvents(StartCause::Init) => {
-                        match app_factory(event_loop_target) {
-                            Ok(new_app) => {
-                                log::info!("[render] window application initialized");
-                                app = Some(new_app);
-                            }
-                            Err(err) => {
-                                log::error!("[render] failed to initialize window app: {err}");
-                                event_loop_target.exit();
-                            }
-                        }
+            .run(move |event, event_loop_target| match event {
+                Event::NewEvents(StartCause::Init) => match app_factory(event_loop_target) {
+                    Ok(new_app) => {
+                        log::info!("[render] window application initialized");
+                        app = Some(new_app);
                     }
-                    Event::WindowEvent { window_id, event } => {
-                        if let Some(app) = app.as_mut() {
-                            app.handle_window_event(event_loop_target, window_id, event);
-                        }
+                    Err(err) => {
+                        log::error!("[render] failed to initialize window app: {err}");
+                        event_loop_target.exit();
                     }
-                    Event::AboutToWait => {
-                        if let Some(app) = app.as_mut() {
-                            if let Err(err) = app.render_frame() {
-                                log::error!("[render] frame error: {err}");
-                                event_loop_target.exit();
-                            }
-                        }
+                },
+                Event::WindowEvent { window_id, event } => {
+                    if let Some(app) = app.as_mut() {
+                        app.handle_window_event(event_loop_target, window_id, event);
                     }
-                    _ => {}
                 }
+                Event::AboutToWait => {
+                    if let Some(app) = app.as_mut()
+                        && let Err(err) = app.render_frame()
+                    {
+                        log::error!("[render] frame error: {err}");
+                        event_loop_target.exit();
+                    }
+                }
+                _ => {}
             })
             .map_err(|_| RenderError::Backend("event loop terminated with error"))?;
 

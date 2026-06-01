@@ -10,7 +10,7 @@
 Theta Engine is a Rust-native VR collaboration platform combining real-time mesh authoring, deterministic command replication, and integrated voice communication. This plan consolidates all architectural decisions, test coverage requirements, and delivery milestones into a universal execution roadmap independent of specific dates.
 
 **Current State:** Phase 4 complete (Command Log & Conflict Resolution), Phase 5 in-flight (Production Hardening & Transport Resilience)  
-**Test Coverage:** 103 tests passing (97 unit + 6 integration with `network-quic`)  
+**Test Coverage:** 113 tests passing (105 unit + 8 integration with all features)  
 **Lines of Code:** ~8,500 source + ~2,700 test = ~11,200 total  
 **Edge-Case Coverage:** Transport timeouts, oversized payloads, signature tampering, rate limiting, replay protection
 
@@ -65,10 +65,10 @@ Theta Engine is a Rust-native VR collaboration platform combining real-time mesh
 
 #### 5. Network Transport
 - **Location:** `src/network/transport.rs`
-- **Status:** ✅ QUIC complete, WebRTC prototype ready
+- **Status:** ✅ QUIC complete, WebRTC data-channel fallback ready
 - **Transports:**
   - **QUIC:** Primary (TLS 1.3, stream isolation, heartbeat diagnostics)
-  - **WebRTC:** Fallback (in-memory channel prototype, real WebRTC pending)
+  - **WebRTC:** Fallback data channels for command and voice traffic (NAT/STUN/TURN hardening pending)
 - **Features:**
   - Unified `CommandTransport` enum abstraction
   - Metrics tracking (RTT, jitter, bandwidth, packet counts)
@@ -350,12 +350,12 @@ pub struct VoiceDiagnostics {
 ---
 
 ### Milestone 3: Compression & Interest Management
-**Status:** Not Started
+**Status:** Started
 
 **Deliverables:**
-- [ ] Zstd compression for command/replication payloads
+- [x] Zstd compression for command/replication frames with small-payload bypass
 - [ ] Dictionary training from recorded delta samples
-- [ ] Compression ratio telemetry tracking
+- [x] Compression ratio telemetry tracking for transport sends
 - [ ] Spatial cell partitioning for large worlds
 - [ ] Tool scope filtering (replicate mesh editor state only to editors)
 - [ ] Client subscription API (`subscribe_to_region`, `unsubscribe`)
@@ -457,9 +457,9 @@ pub struct VoiceDiagnostics {
 ## Technical Debt & Future Work
 
 ### Known Limitations
-1. **WebRTC Signaling:** In-memory prototype only; needs production signaling server
-2. **Voice Codec:** Opus integration pending; placeholder types ready
-3. **Compression:** JSON serialization instead of FlatBuffers (20-30% overhead)
+1. **WebRTC NAT Hardening:** STUN/TURN fallback and production deployment validation remain.
+2. **Voice Quality:** Opus integration is live; FEC, bitrate adaptation, and noise suppression remain.
+3. **Compression:** Zstd frame compression is live; dictionary training and bandwidth baselines remain.
 4. **Interest Management:** No spatial filtering yet (all entities replicate to all peers)
 5. **Physics:** Rapier3D integration deferred (collision/haptics not implemented)
 6. **Asset Streaming:** No CDN integration or resumable chunking

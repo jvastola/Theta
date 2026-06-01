@@ -1,0 +1,4 @@
+[env]
+# audiopus_sys vendors an Opus CMake project with a pre-3.5 minimum policy.
+# CMake 4 rejects that unless this compatibility floor is set explicitly.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
