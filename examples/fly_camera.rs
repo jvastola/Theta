@@ -19,8 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     use theta_engine::render::GpuBackend;
     use winit::{
-        dpi::PhysicalPosition,
-        event::{DeviceEvent, ElementState, MouseButton, WindowEvent},
+        event::{DeviceEvent, ElementState, WindowEvent},
         event_loop::{EventLoopWindowTarget},
         keyboard::{KeyCode, PhysicalKey},
         window::{Window, WindowId},
@@ -78,6 +77,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 theta_engine::render::window::WindowBackend::initialize(config)?;
             backend.create_window_surface(Arc::clone(&window))?;
 
+            // Auto-capture mouse and hide cursor on startup
+            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+            window.set_cursor_visible(false);
+
             Ok(Self {
                 window,
                 backend,
@@ -90,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pitch: -0.15,
                 },
                 keys_held: std::collections::HashSet::new(),
-                mouse_captured: false,
+                mouse_captured: true,
             })
         }
 
@@ -175,14 +178,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match key {
                         KeyCode::Escape => {
                             if self.mouse_captured {
+                                // Release mouse but keep window open
                                 self.mouse_captured = false;
                                 let _ = self.window.set_cursor_grab(
                                     winit::window::CursorGrabMode::None,
                                 );
                                 self.window.set_cursor_visible(true);
-                            } else {
-                                event_loop.exit();
                             }
+                            // Pressing ESC again while mouse is free does nothing —
+                            // use the window close button to quit.
                         }
                         _ => match event.state {
                             ElementState::Pressed => {
@@ -194,23 +198,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                     }
                 }
-                WindowEvent::MouseInput {
-                    state: ElementState::Pressed,
-                    button: MouseButton::Left,
-                    ..
-                } => {
-                    if !self.mouse_captured {
+                WindowEvent::Focused(focused) => {
+                    if focused {
+                        // Re-capture mouse when window regains focus
                         self.mouse_captured = true;
                         let _ = self.window.set_cursor_grab(
                             winit::window::CursorGrabMode::Locked,
                         );
                         self.window.set_cursor_visible(false);
-                        let size = self.window.inner_size();
-                        let _ = self.window.set_cursor_position(PhysicalPosition::new(
-                            size.width as f64 / 2.0,
-                            size.height as f64 / 2.0,
-                        ));
                     }
+                    // Don't release on focus loss — that way clicking ESC
+                    // (which may briefly unfocus) won't immediately exit.
+                    // Mouse is only released by explicit ESC press.
                 }
                 _ => {}
             }
@@ -251,14 +250,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 self.camera.pos[2] -= fwd[2] * vel;
             }
             if self.keys_held.contains(&KeyCode::KeyD) {
-                self.camera.pos[0] += right[0] * vel;
-                self.camera.pos[1] += right[1] * vel;
-                self.camera.pos[2] += right[2] * vel;
-            }
-            if self.keys_held.contains(&KeyCode::KeyA) {
                 self.camera.pos[0] -= right[0] * vel;
                 self.camera.pos[1] -= right[1] * vel;
                 self.camera.pos[2] -= right[2] * vel;
+            }
+            if self.keys_held.contains(&KeyCode::KeyA) {
+                self.camera.pos[0] += right[0] * vel;
+                self.camera.pos[1] += right[1] * vel;
+                self.camera.pos[2] += right[2] * vel;
             }
             if self.keys_held.contains(&KeyCode::Space) {
                 self.camera.pos[1] += vel;
@@ -360,7 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("║  LCtrl    Move down                              ║");
     println!("║  Shift    Hold to move faster                    ║");
     println!("║  Click    Capture mouse for look                  ║");
-    println!("║  ESC      Release mouse / quit                   ║");
+    println!("║  ESC      Release mouse (X to quit)              ║");
     println!("╚══════════════════════════════════════════════════╝");
 
     event_loop.run(move |event_loop| {
