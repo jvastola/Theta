@@ -373,9 +373,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let v1=((row+1)*atlas.cell_height)as f32*inv_th;
 
                     // Character quad in world-space (fixed size, facing +Z)
+                    // Use 80% of cell width for the glyph, 20% for spacing
                     let char_w=text_width/char_count;
+                    let gap=char_w*0.15;
+                    let draw_w=char_w-gap;
                     let x0=i as f32*char_w - text_width*0.5;
-                    let x1=x0+char_w;
+                    let x1=x0+draw_w;
                     let y0=-text_height*0.5;
                     let y1=text_height*0.5;
 
