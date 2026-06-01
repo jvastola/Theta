@@ -15,7 +15,7 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 #[cfg(feature = "render-wgpu")]
 use winit::{
-    event::WindowEvent,
+    event::{DeviceEvent, WindowEvent},
     event_loop::{EventLoop, EventLoopWindowTarget},
     window::{Window, WindowId},
 };
@@ -66,6 +66,8 @@ pub struct WindowBackend {
     surface: Option<WindowSurface>,
     geometry_pipeline: Option<GeometryPipeline>,
     initialized_for_rendering: bool,
+    /// Optional custom VP matrix; when set, overrides `create_view_projection_matrix`.
+    custom_vp: Option<[[f32; 4]; 4]>,
 }
 
 #[cfg(feature = "render-wgpu")]
@@ -170,6 +172,7 @@ impl WindowBackend {
             surface: None,
             geometry_pipeline: None,
             initialized_for_rendering: false,
+            custom_vp: None,
         })
     }
 
@@ -437,6 +440,14 @@ impl WindowBackend {
         self.surface.as_ref().map(|s| s.window.as_ref())
     }
 
+    /// Set a custom view-projection matrix that overrides the default
+    /// auto-rotating camera. Pass `None` to restore the default behavior.
+    /// The matrix should be in the same format as `create_view_projection_matrix`
+    /// (row-major, uploaded as-is for the WGSL shader).
+    pub fn set_custom_view_projection(&mut self, vp: Option<[[f32; 4]; 4]>) {
+        self.custom_vp = vp;
+    }
+
     fn create_view_projection_matrix(
         &self,
         elapsed_seconds: f32,
@@ -558,12 +569,14 @@ impl GpuBackend for WindowBackend {
                 StereoMode::Mono => {
                     let aspect_ratio = size.width as f32 / size.height as f32;
 
-                    // No eye separation for mono
-                    let matrix = self.create_view_projection_matrix(
-                        inputs.elapsed_seconds,
-                        0.0,
-                        aspect_ratio,
-                    );
+                    // Use custom VP matrix if set, otherwise default auto-rotate
+                    let matrix = self.custom_vp.unwrap_or_else(|| {
+                        self.create_view_projection_matrix(
+                            inputs.elapsed_seconds,
+                            0.0,
+                            aspect_ratio,
+                        )
+                    });
                     let uniforms = Uniforms {
                         view_projection: matrix,
                     };
@@ -589,11 +602,13 @@ impl GpuBackend for WindowBackend {
                     let aspect_ratio = half_width as f32 / size.height as f32;
 
                     // Left eye viewport (negative offset)
-                    let left_matrix = self.create_view_projection_matrix(
-                        inputs.elapsed_seconds,
-                        -1.0,
-                        aspect_ratio,
-                    );
+                    let left_matrix = self.custom_vp.unwrap_or_else(|| {
+                        self.create_view_projection_matrix(
+                            inputs.elapsed_seconds,
+                            -1.0,
+                            aspect_ratio,
+                        )
+                    });
                     let left_uniforms = Uniforms {
                         view_projection: left_matrix,
                     };
@@ -615,11 +630,13 @@ impl GpuBackend for WindowBackend {
                     render_pass.draw_indexed(0..geometry.index_count, 0, 0..1);
 
                     // Right eye viewport (positive offset)
-                    let right_matrix = self.create_view_projection_matrix(
-                        inputs.elapsed_seconds,
-                        1.0,
-                        aspect_ratio,
-                    );
+                    let right_matrix = self.custom_vp.unwrap_or_else(|| {
+                        self.create_view_projection_matrix(
+                            inputs.elapsed_seconds,
+                            1.0,
+                            aspect_ratio,
+                        )
+                    });
                     let right_uniforms = Uniforms {
                         view_projection: right_matrix,
                     };
@@ -645,11 +662,13 @@ impl GpuBackend for WindowBackend {
                     let aspect_ratio = size.width as f32 / half_height as f32;
 
                     // Left eye viewport (top, negative offset)
-                    let left_matrix = self.create_view_projection_matrix(
-                        inputs.elapsed_seconds,
-                        -1.0,
-                        aspect_ratio,
-                    );
+                    let left_matrix = self.custom_vp.unwrap_or_else(|| {
+                        self.create_view_projection_matrix(
+                            inputs.elapsed_seconds,
+                            -1.0,
+                            aspect_ratio,
+                        )
+                    });
                     let left_uniforms = Uniforms {
                         view_projection: left_matrix,
                     };
@@ -671,11 +690,13 @@ impl GpuBackend for WindowBackend {
                     render_pass.draw_indexed(0..geometry.index_count, 0, 0..1);
 
                     // Right eye viewport (bottom, positive offset)
-                    let right_matrix = self.create_view_projection_matrix(
-                        inputs.elapsed_seconds,
-                        1.0,
-                        aspect_ratio,
-                    );
+                    let right_matrix = self.custom_vp.unwrap_or_else(|| {
+                        self.create_view_projection_matrix(
+                            inputs.elapsed_seconds,
+                            1.0,
+                            aspect_ratio,
+                        )
+                    });
                     let right_uniforms = Uniforms {
                         view_projection: right_matrix,
                     };
@@ -763,6 +784,11 @@ impl WindowEventLoop {
                         app.handle_window_event(event_loop_target, window_id, event);
                     }
                 }
+                Event::DeviceEvent { event, .. } => {
+                    if let Some(app) = app.as_mut() {
+                        app.handle_device_event(event_loop_target, event);
+                    }
+                }
                 Event::AboutToWait => {
                     if let Some(app) = app.as_mut()
                         && let Err(err) = app.render_frame()
@@ -789,6 +815,12 @@ pub trait WindowAppTrait {
         event: WindowEvent,
     );
     fn render_frame(&mut self) -> RenderResult<()>;
+    fn handle_device_event(
+        &mut self,
+        _event_loop: &EventLoopWindowTarget<()>,
+        _event: DeviceEvent,
+    ) {
+    }
 }
 
 /// Application state for window rendering
