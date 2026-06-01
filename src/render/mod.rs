@@ -6,11 +6,15 @@ use std::fmt;
 use std::sync::Arc;
 
 #[cfg(feature = "render-wgpu")]
+pub mod font;
+#[cfg(feature = "render-wgpu")]
 pub mod window;
 #[cfg(feature = "render-wgpu")]
 pub use window::{
     StereoMode, WindowApp, WindowAppTrait, WindowBackend, WindowConfig, WindowEventLoop,
 };
+#[cfg(feature = "render-wgpu")]
+pub use font::{FontAtlas, TextVertex, build_text_vertices};
 
 pub use RenderMode as Mode;
 
