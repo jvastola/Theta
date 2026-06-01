@@ -6,7 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::Arc;
     use theta_engine::render::FontAtlas;
     use wgpu::util::DeviceExt;
-    use winit::event::{DeviceEvent, ElementState, Event, StartCause, WindowEvent};
+    use winit::event::{DeviceEvent, ElementState, Event, MouseButton, StartCause, WindowEvent};
     use winit::event_loop::EventLoop;
     use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -143,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     #[rustfmt::skip]
     let cube_i:&[u16]=&[0,1,2,2,3,0,4,5,6,6,7,4,8,9,10,10,11,8,12,13,14,14,15,12,16,17,18,18,19,16,20,21,22,22,23,20];
-    let cube_vb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("CVB"),contents:bytemuck::cast_slice(cube_v),usage:wgpu::BufferUsages::VERTEX});
+    let _cube_vb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("CVB"),contents:bytemuck::cast_slice(cube_v),usage:wgpu::BufferUsages::VERTEX});
     let cube_ib=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("CIB"),contents:bytemuck::cast_slice(cube_i),usage:wgpu::BufferUsages::INDEX});
 
     // ── Grid ───────────────────────────────────────────────────────────
@@ -278,6 +278,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mut keys=std::collections::HashSet::<KeyCode>::new();
     let mut mouse_cap=true;
     let mut last_frame=std::time::Instant::now();
+    let mut cube_rot_y:f32=0.0;
+    let mut hit_point:Option<[f32;3]>=None;
     let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
     window.set_cursor_visible(false);
 
@@ -323,6 +325,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 WindowEvent::Focused(f)=>{
                     if f{mouse_cap=true;let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);window.set_cursor_visible(false);}
                 }
+                WindowEvent::MouseInput{state:ElementState::Pressed,button:MouseButton::Left,..}=>{
+                    let ray_origin=camera.pos;
+                    let ray_dir=camera.forward();
+                    let cube_center=[0.0f32,0.5,0.0];
+                    let cube_radius=0.9f32;
+                    let oc=sub(ray_origin,cube_center);
+                    let a=dot(ray_dir,ray_dir);
+                    let b=2.0*dot(oc,ray_dir);
+                    let c=dot(oc,oc)-cube_radius*cube_radius;
+                    let disc=b*b-4.0*a*c;
+                    if disc>=0.0{
+                        let t=(-b-disc.sqrt())/(2.0*a);
+                        if t>0.0{
+                            hit_point=Some([ray_origin[0]+ray_dir[0]*t,ray_origin[1]+ray_dir[1]*t,ray_origin[2]+ray_dir[2]*t]);
+                            cube_rot_y+=std::f32::consts::FRAC_PI_2;
+                        }
+                    }
+                }
                 _=>{}
             }
             Event::DeviceEvent{event:DeviceEvent::MouseMotion{delta:(dx,dy)},..}=>{
@@ -344,6 +364,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 let vp=build_vp(&camera,w/h);
                 let vp_gpu=transpose(vp);
                 queue.write_buffer(&ub3d,0,bytemuck::cast_slice(&vp_gpu));
+
+                // Build rotated cube vertices
+                let cos_r=cube_rot_y.cos();
+                let sin_r=cube_rot_y.sin();
+                let cube_verts_rot:Vec<V3d>=cube_v.iter().map(|v|{
+                    let rx=v.position[0]*cos_r+v.position[2]*sin_r;
+                    let rz=-v.position[0]*sin_r+v.position[2]*cos_r;
+                    V3d{position:[rx,v.position[1],rz],color:v.color}
+                }).collect();
+                let cube_vb_rot=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("CVR"),contents:bytemuck::cast_slice(&cube_verts_rot),usage:wgpu::BufferUsages::VERTEX});
+
+                // Build ray line + hit point cross vertices
+                let mut ray_verts:Vec<V3d>=Vec::new();
+                let mut ray_idx:Vec<u16>=Vec::new();
+                if let Some(hp)=hit_point{
+                    ray_verts.push(V3d{position:camera.pos,color:[1.0,1.0,0.0]});
+                    ray_verts.push(V3d{position:hp,color:[1.0,1.0,0.0]});
+                    ray_idx.push(0);ray_idx.push(1);
+                    let s=0.06f32;
+                    let b=ray_verts.len() as u16;
+                    ray_verts.push(V3d{position:[hp[0]-s,hp[1],hp[2]],color:[1.0,0.2,0.2]});
+                    ray_verts.push(V3d{position:[hp[0]+s,hp[1],hp[2]],color:[1.0,0.2,0.2]});
+                    ray_verts.push(V3d{position:[hp[0],hp[1]-s,hp[2]],color:[0.2,1.0,0.2]});
+                    ray_verts.push(V3d{position:[hp[0],hp[1]+s,hp[2]],color:[0.2,1.0,0.2]});
+                    ray_verts.push(V3d{position:[hp[0],hp[1],hp[2]-s],color:[0.2,0.2,1.0]});
+                    ray_verts.push(V3d{position:[hp[0],hp[1],hp[2]+s],color:[0.2,0.2,1.0]});
+                    ray_idx.extend_from_slice(&[b,b+1,b+2,b+3,b+4,b+5]);
+                }
+                let (ray_vb,ray_ib)=if !ray_verts.is_empty(){
+                    (Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("RVB"),contents:bytemuck::cast_slice(&ray_verts),usage:wgpu::BufferUsages::VERTEX})),
+                     Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("RIB"),contents:bytemuck::cast_slice(&ray_idx),usage:wgpu::BufferUsages::INDEX})))
+                }else{(None,None)};
 
                 // Build text billboard: a 3D quad in world space above the cube
                 // Fixed world-space size: ~2 units wide, ~0.3 units tall
@@ -430,10 +482,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     pass.set_vertex_buffer(0,grid_vb.slice(..));pass.set_index_buffer(grid_ib.slice(..),wgpu::IndexFormat::Uint16);
                     pass.draw_indexed(0..grid_ic,0,0..1);
 
-                    // Cube
+                    // Cube (rotated)
                     pass.set_pipeline(&tri_pipe);pass.set_bind_group(0,&bg3d,&[]);
-                    pass.set_vertex_buffer(0,cube_vb.slice(..));pass.set_index_buffer(cube_ib.slice(..),wgpu::IndexFormat::Uint16);
+                    pass.set_vertex_buffer(0,cube_vb_rot.slice(..));pass.set_index_buffer(cube_ib.slice(..),wgpu::IndexFormat::Uint16);
                     pass.draw_indexed(0..cube_i.len() as u32,0,0..1);
+
+                    // Ray line + hit point cross
+                    if let (Some(rvb),Some(rib))=(&ray_vb,&ray_ib){
+                        pass.set_pipeline(&line_pipe);
+                        pass.set_bind_group(0,&bg3d,&[]);
+                        pass.set_vertex_buffer(0,rvb.slice(..));
+                        pass.set_index_buffer(rib.slice(..),wgpu::IndexFormat::Uint16);
+                        pass.draw_indexed(0..ray_idx.len() as u32,0,0..1);
+                    }
 
                     // Text billboard
                     if let (Some(tvb),Some(tib))=(&tvb,&tib){
