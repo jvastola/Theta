@@ -280,6 +280,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mut last_frame=std::time::Instant::now();
     let mut cube_rot_y:f32=0.0;
     let mut hit_point:Option<[f32;3]>=None;
+    let mut mouse_pos:[f32;2]=[640.0,360.0]; // track mouse position in screen pixels
     let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
     window.set_cursor_visible(false);
 
@@ -291,6 +292,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     println!("║  Space    Move up    LCtrl  Move down            ║");
     println!("║  Shift    Faster     ESC    Release mouse        ║");
     println!("╚══════════════════════════════════════════════════╝");
+
+    // Track ESC key state to avoid repeat toggling
+    let mut esc_was_pressed=false;
 
     // ── Event loop ─────────────────────────────────────────────────────
     event_loop.run(move|event,el|{
@@ -314,20 +318,60 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let PhysicalKey::Code(key)=ke.physical_key else{return};
                     match key{
                         KeyCode::Escape=>{
-                            if mouse_cap{mouse_cap=false;
-                                let _=window.set_cursor_grab(winit::window::CursorGrabMode::None);
-                                window.set_cursor_visible(true);
+                            // Only toggle on the initial press, not key repeat
+                            let pressed=ke.state==ElementState::Pressed;
+                            if pressed && !esc_was_pressed{
+                                mouse_cap=!mouse_cap;
+                                if mouse_cap{
+                                    let _=window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
+                                    window.set_cursor_visible(false);
+                                }else{
+                                    let _=window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                    window.set_cursor_visible(true);
+                                }
+                                eprintln!("DEBUG: ESC toggled, mouse_cap={}", mouse_cap);
                             }
+                            esc_was_pressed=pressed;
                         }
                         _=>match ke.state{ElementState::Pressed=>{keys.insert(key);}ElementState::Released=>{keys.remove(&key);}},
                     }
                 }
                 WindowEvent::Focused(f)=>{
-                    if f{mouse_cap=true;let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);window.set_cursor_visible(false);}
+                    eprintln!("DEBUG: Focused event, focused={}", f);
+                    // Only auto-recapture if we were previously in capture mode
+                    // and the window regains focus (e.g. after clicking X button)
+                    if f && mouse_cap{
+                        let _=window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
+                        window.set_cursor_visible(false);
+                    }
+                }
+                WindowEvent::CursorMoved{position,..}=>{
+                    mouse_pos=[position.x as f32,position.y as f32];
                 }
                 WindowEvent::MouseInput{state:ElementState::Pressed,button:MouseButton::Left,..}=>{
                     let ray_origin=camera.pos;
-                    let ray_dir=camera.forward();
+                    let ray_dir=if mouse_cap{
+                        // Mouse locked: ray from center
+                        camera.forward()
+                    }else{
+                        // Mouse free: ray from cursor position
+                        let phys_w=window.inner_size().width as f32;
+                        let phys_h=window.inner_size().height as f32;
+                        // Convert mouse pixel to normalized device coordinates [-1,1]
+                        let ndc_x=1.0-(mouse_pos[0]/phys_w)*2.0; // flip X so left=left
+                        let ndc_y=1.0-(mouse_pos[1]/phys_h)*2.0;
+                        // Build ray direction from camera basis + NDC offset
+                        let fwd=camera.forward();
+                        let right=camera.right();
+                        let up=[0.0f32,1.0,0.0];
+                        let tan_half_fov=(std::f32::consts::FRAC_PI_8).tan();
+                        let aspect=phys_w/phys_h;
+                        normalize([
+                            fwd[0]+right[0]*ndc_x*aspect*tan_half_fov+up[0]*ndc_y*tan_half_fov,
+                            fwd[1]+right[1]*ndc_x*aspect*tan_half_fov+up[1]*ndc_y*tan_half_fov,
+                            fwd[2]+right[2]*ndc_x*aspect*tan_half_fov+up[2]*ndc_y*tan_half_fov,
+                        ])
+                    };
                     let cube_center=[0.0f32,0.5,0.0];
                     let cube_radius=0.9f32;
                     let oc=sub(ray_origin,cube_center);
