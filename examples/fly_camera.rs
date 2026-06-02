@@ -430,7 +430,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         window.set_cursor_visible(false);
                     }
                 }
-                WindowEvent::MouseInput{state:ElementState::Pressed,button:MouseButton::Left,..}=>{
+                WindowEvent::MouseInput{state:ElementState::Pressed,button:MouseButton::Left,..}=>{ // click_handler_start
                     let (ray_origin, ray_dir)=if mouse_cap{
                         // Mouse locked: ray from center
                         (camera.pos, camera.forward())
@@ -450,10 +450,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                             let ortho_size=20.0f32;
                             let half_w=ortho_size*0.5;
                             let half_h=half_w/(phys_w/phys_h);
+                            let off_x=right[0]*ndc_x*half_w+up[0]*ndc_y*half_h;
+                            let off_y=right[1]*ndc_x*half_w+up[1]*ndc_y*half_h;
+                            let off_z=right[2]*ndc_x*half_w+up[2]*ndc_y*half_h;
+                            let t_scene=if fwd[2].abs()>1e-8{-camera.pos[2]/fwd[2]}else{100.0};
                             let origin=[
-                                camera.pos[0]+right[0]*ndc_x*half_w+up[0]*ndc_y*half_h,
-                                camera.pos[1]+right[1]*ndc_x*half_w+up[1]*ndc_y*half_h,
-                                camera.pos[2]+right[2]*ndc_x*half_w+up[2]*ndc_y*half_h,
+                                camera.pos[0]+off_x+fwd[0]*t_scene,
+                                camera.pos[1]+off_y+fwd[1]*t_scene,
+                                camera.pos[2]+off_z+fwd[2]*t_scene,
                             ];
                             (origin, fwd)
                         }else{
@@ -587,13 +591,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         let up=cross(right,fwd);
                         if is_ortho{
                             // Ortho: parallel rays from cursor position on near plane
+                            // Offset from camera position in right/up to match the
+                            // ortho frustum, then project forward to scene depth
                             let ortho_size=20.0f32;
                             let half_w=ortho_size*0.5;
                             let half_h=half_w/(phys_w/phys_h);
+                            let off_x=right[0]*ndc_x*half_w+up[0]*ndc_y*half_h;
+                            let off_y=right[1]*ndc_x*half_w+up[1]*ndc_y*half_h;
+                            let off_z=right[2]*ndc_x*half_w+up[2]*ndc_y*half_h;
+                            // Find t where ray hits the Z=0 plane (scene depth)
+                            let t_scene=if fwd[2].abs()>1e-8{-camera.pos[2]/fwd[2]}else{100.0};
                             let origin=[
-                                camera.pos[0]+right[0]*ndc_x*half_w+up[0]*ndc_y*half_h,
-                                camera.pos[1]+right[1]*ndc_x*half_w+up[1]*ndc_y*half_h,
-                                camera.pos[2]+right[2]*ndc_x*half_w+up[2]*ndc_y*half_h,
+                                camera.pos[0]+off_x+fwd[0]*t_scene,
+                                camera.pos[1]+off_y+fwd[1]*t_scene,
+                                camera.pos[2]+off_z+fwd[2]*t_scene,
                             ];
                             (origin, fwd)
                         }else{
