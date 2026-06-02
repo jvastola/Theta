@@ -268,7 +268,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         label:Some("TexPipe"),layout:Some(&tex_pll),
         vertex:wgpu::VertexState{module:&tex3d_shader,entry_point:"vs_main",buffers:&[TextVert::desc()]},
         fragment:Some(wgpu::FragmentState{module:&tex3d_shader,entry_point:"fs_main",targets:&[Some(wgpu::ColorTargetState{format,blend:Some(wgpu::BlendState::ALPHA_BLENDING),write_mask:wgpu::ColorWrites::ALL})]}),
-        primitive:wgpu::PrimitiveState{topology:wgpu::PrimitiveTopology::TriangleList,cull_mode:None,..Default::default()},
+        primitive:wgpu::PrimitiveState{topology:wgpu::PrimitiveTopology::TriangleList,front_face:wgpu::FrontFace::Cw,cull_mode:Some(wgpu::Face::Back),..Default::default()},
         depth_stencil:Some(wgpu::DepthStencilState{format:wgpu::TextureFormat::Depth32Float,depth_write_enabled:true,depth_compare:wgpu::CompareFunction::Less,stencil:wgpu::StencilState::default(),bias:wgpu::DepthBiasState::default()}),
         multisample:wgpu::MultisampleState::default(),multiview:None,
     });
