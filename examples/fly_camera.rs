@@ -281,6 +281,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mut cube_rot_y:f32=0.0;
     let mut cube_2d:bool=false;
     let mut hit_point:Option<[f32;3]>=None;
+    let mut hover_hit_point:Option<[f32;3]>=None; // hover ray hit point on cube AABB
     let mut mouse_pos:[f32;2]=[640.0,360.0]; // track mouse position in screen pixels
     let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
     window.set_cursor_visible(false);
@@ -324,8 +325,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                             if pressed && !esc_was_pressed{
                                 mouse_cap=!mouse_cap;
                                 if mouse_cap{
-                                    let _=window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
+                                    let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
                                     window.set_cursor_visible(false);
+                                    // Reset mouse pos to center so hover ray starts from middle
+                                    let phys_w=window.inner_size().width as f32;
+                                    let phys_h=window.inner_size().height as f32;
+                                    mouse_pos=[phys_w*0.5,phys_h*0.5];
                                 }else{
                                     let _=window.set_cursor_grab(winit::window::CursorGrabMode::None);
                                     window.set_cursor_visible(true);
@@ -339,15 +344,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 }
                 WindowEvent::Focused(f)=>{
                     eprintln!("DEBUG: Focused event, focused={}", f);
-                    // Only auto-recapture if we were previously in capture mode
-                    // and the window regains focus (e.g. after clicking X button)
                     if f && mouse_cap{
-                        let _=window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
+                        // Window gained focus while in capture mode: lock and hide cursor
+                        let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
                         window.set_cursor_visible(false);
+                    } else if !f{
+                        // Window lost focus: release cursor so user can interact with other windows
+                        let _=window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                        window.set_cursor_visible(true);
                     }
                 }
                 WindowEvent::CursorMoved{position,..}=>{
                     mouse_pos=[position.x as f32,position.y as f32];
+                }
+                WindowEvent::CursorLeft{..}=>{
+                    // Cursor left the window: if in capture mode, re-hide it
+                    if mouse_cap{
+                        window.set_cursor_visible(false);
+                    }
+                }
+                WindowEvent::CursorEntered{..}=>{
+                    // Cursor entered the window: if in capture mode, hide it
+                    if mouse_cap{
+                        window.set_cursor_visible(false);
+                    }
                 }
                 WindowEvent::MouseInput{state:ElementState::Pressed,button:MouseButton::Left,..}=>{
                     let ray_origin=camera.pos;
@@ -358,13 +378,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         // Mouse free: ray from cursor position
                         let phys_w=window.inner_size().width as f32;
                         let phys_h=window.inner_size().height as f32;
-                        // Convert mouse pixel to normalized device coordinates [-1,1]
-                        let ndc_x=1.0-(mouse_pos[0]/phys_w)*2.0; // flip X so left=left
+                        // NDC: +X right, +Y up
+                        let ndc_x=(mouse_pos[0]/phys_w)*2.0-1.0;
                         let ndc_y=1.0-(mouse_pos[1]/phys_h)*2.0;
-                        // Build ray direction from camera basis + NDC offset
+                        // Build ray using the same basis as the view matrix:
+                        // right = cross(fwd, world_up) — matches the view matrix's 's' vector
                         let fwd=camera.forward();
-                        let right=camera.right();
-                        let up=[0.0f32,1.0,0.0];
+                        let world_up=[0.0f32,1.0,0.0];
+                        let right=normalize(cross(fwd,world_up));
+                        let up=cross(right,fwd);
                         let tan_half_fov=(std::f32::consts::FRAC_PI_8).tan();
                         let aspect=phys_w/phys_h;
                         normalize([
@@ -373,19 +395,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                             fwd[2]+right[2]*ndc_x*aspect*tan_half_fov+up[2]*ndc_y*tan_half_fov,
                         ])
                     };
-                    let cube_center=[0.0f32,0.5,0.0];
-                    let cube_radius=0.9f32;
-                    let oc=sub(ray_origin,cube_center);
-                    let a=dot(ray_dir,ray_dir);
-                    let b=2.0*dot(oc,ray_dir);
-                    let c=dot(oc,oc)-cube_radius*cube_radius;
-                    let disc=b*b-4.0*a*c;
-                    if disc>=0.0{
-                        let t=(-b-disc.sqrt())/(2.0*a);
-                        if t>0.0{
-                            hit_point=Some([ray_origin[0]+ray_dir[0]*t,ray_origin[1]+ray_dir[1]*t,ray_origin[2]+ray_dir[2]*t]);
-                            cube_2d=!cube_2d;
+                    // AABB ray intersection with the cube [-0.5,0.5]^3
+                    let aabb_min=[-0.5f32,-0.5,-0.5];
+                    let aabb_max=[0.5f32,0.5,0.5];
+                    let mut tmin=f32::NEG_INFINITY;
+                    let mut tmax=f32::INFINITY;
+                    let mut _miss=false;
+                    for i in 0..3{
+                        if ray_dir[i].abs()<1e-8{
+                            if ray_origin[i]<aabb_min[i]||ray_origin[i]>aabb_max[i]{
+                                _miss=true;break;
+                            }
+                        }else{
+                            let t1=(aabb_min[i]-ray_origin[i])/ray_dir[i];
+                            let t2=(aabb_max[i]-ray_origin[i])/ray_dir[i];
+                            let(tlo,thi)=if t1<t2{(t1,t2)}else{(t2,t1)};
+                            tmin=tmin.max(tlo);
+                            tmax=tmax.min(thi);
                         }
+                    }
+                    if !_miss&&tmin<=tmax&&tmax>0.0{
+                        let t=tmin.max(0.0);
+                        let hp=[ray_origin[0]+ray_dir[0]*t,ray_origin[1]+ray_dir[1]*t,ray_origin[2]+ray_dir[2]*t];
+                        hit_point=Some(hp);
+                        cube_2d=!cube_2d;
                     }
                 }
                 _=>{}
@@ -394,6 +427,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if mouse_cap{camera.yaw+=dx as f32*0.002;camera.pitch-=dy as f32*0.002;camera.pitch=camera.pitch.clamp(-1.55,1.55);}
             }
             Event::AboutToWait=>{
+                // Aggressively re-hide cursor every frame when captured
+                // (macOS can show a frozen cursor when focus changes)
+                if mouse_cap{
+                    window.set_cursor_visible(false);
+                }
+
                 // Update camera
                 let now=std::time::Instant::now();let dt=now.duration_since(last_frame).as_secs_f32();last_frame=now;
                 let speed=if keys.contains(&KeyCode::ShiftLeft)||keys.contains(&KeyCode::ShiftRight){12.0}else{4.0};
@@ -410,13 +449,75 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 let vp_gpu=transpose(vp);
                 queue.write_buffer(&ub3d,0,bytemuck::cast_slice(&vp_gpu));
 
+                // ── Hover ray test ──────────────────────────────────────
+                // Cast a ray from the camera center (or cursor position when
+                // mouse is free) and test against the cube AABB.
+                {
+                    let ray_origin=camera.pos;
+                    let ray_dir=if mouse_cap{
+                        camera.forward()
+                    }else{
+                        let phys_w=surf_cfg.width as f32;
+                        let phys_h=surf_cfg.height as f32;
+                        let ndc_x=(mouse_pos[0]/phys_w)*2.0-1.0;
+                        let ndc_y=1.0-(mouse_pos[1]/phys_h)*2.0;
+                        // Use same basis as view matrix: right = cross(fwd, world_up)
+                        let fwd=camera.forward();
+                        let world_up=[0.0f32,1.0,0.0];
+                        let right=normalize(cross(fwd,world_up));
+                        let up=cross(right,fwd);
+                        let tan_half_fov=(std::f32::consts::FRAC_PI_8).tan();
+                        let aspect=phys_w/phys_h;
+                        normalize([
+                            fwd[0]+right[0]*ndc_x*aspect*tan_half_fov+up[0]*ndc_y*tan_half_fov,
+                            fwd[1]+right[1]*ndc_x*aspect*tan_half_fov+up[1]*ndc_y*tan_half_fov,
+                            fwd[2]+right[2]*ndc_x*aspect*tan_half_fov+up[2]*ndc_y*tan_half_fov,
+                        ])
+                    };
+                    // AABB ray intersection with the cube [-0.5,0.5]^3
+                    let aabb_min=[-0.5f32,-0.5,-0.5];
+                    let aabb_max=[0.5f32,0.5,0.5];
+                    let mut tmin=f32::NEG_INFINITY;
+                    let mut tmax=f32::INFINITY;
+                    let mut _miss=false;
+                    for i in 0..3{
+                        if ray_dir[i].abs()<1e-8{
+                            if ray_origin[i]<aabb_min[i]||ray_origin[i]>aabb_max[i]{
+                                _miss=true;break;
+                            }
+                        }else{
+                            let t1=(aabb_min[i]-ray_origin[i])/ray_dir[i];
+                            let t2=(aabb_max[i]-ray_origin[i])/ray_dir[i];
+                            let(tlo,thi)=if t1<t2{(t1,t2)}else{(t2,t1)};
+                            tmin=tmin.max(tlo);
+                            tmax=tmax.min(thi);
+                        }
+                    }
+                    if !_miss&&tmin<=tmax&&tmax>0.0{
+                        let t=tmin.max(0.0);
+                        hover_hit_point=Some([
+                            ray_origin[0]+ray_dir[0]*t,
+                            ray_origin[1]+ray_dir[1]*t,
+                            ray_origin[2]+ray_dir[2]*t,
+                        ]);
+                    }else{
+                        hover_hit_point=None;
+                    }
+                }
+
                 // Build rotated cube vertices
+                // When hovering, brighten the cube colors to show the hover state.
+                let hover_mul=if hover_hit_point.is_some(){2.5}else{1.0};
                 let cos_r=cube_rot_y.cos();
                 let sin_r=cube_rot_y.sin();
                 let cube_verts_rot:Vec<V3d>=cube_v.iter().map(|v|{
                     let rx=v.position[0]*cos_r+v.position[2]*sin_r;
                     let rz=-v.position[0]*sin_r+v.position[2]*cos_r;
-                    V3d{position:[rx,v.position[1],rz],color:v.color}
+                    V3d{position:[rx,v.position[1],rz],color:[
+                        (v.color[0]*hover_mul).min(1.0),
+                        (v.color[1]*hover_mul).min(1.0),
+                        (v.color[2]*hover_mul).min(1.0),
+                    ]}
                 }).collect();
                 let cube_vb_rot=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("CVR"),contents:bytemuck::cast_slice(&cube_verts_rot),usage:wgpu::BufferUsages::VERTEX});
 
@@ -432,7 +533,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 let quad_2d_vb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("Q2V"),contents:bytemuck::cast_slice(&quad_2d_verts),usage:wgpu::BufferUsages::VERTEX});
                 let quad_2d_ib=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("Q2I"),contents:bytemuck::cast_slice(quad_2d_idx),usage:wgpu::BufferUsages::INDEX});
 
-                // Build ray line + hit point cross vertices
+                // Build hover hit-point sphere (wireframe, shown every frame when hovering)
+                let mut hover_sphere_verts:Vec<V3d>=Vec::new();
+                let mut hover_sphere_idx:Vec<u16>=Vec::new();
+                if let Some(hhp)=hover_hit_point{
+                        let sphere_color=[0.0f32,1.0,0.6];
+                        let sphere_r=0.05f32;
+                        let segs=12u32;
+                        // Three axis-aligned wireframe circles
+                        for axis in 0..3{
+                            let base=hover_sphere_verts.len() as u16;
+                            for i in 0..segs{
+                                let angle=(i as f32)/(segs as f32)*std::f32::consts::TAU;
+                                let cos_a=angle.cos();
+                                let sin_a=angle.sin();
+                                let p=match axis{
+                                    0=>[hhp[0],hhp[1]+cos_a*sphere_r,hhp[2]+sin_a*sphere_r],
+                                    1=>[hhp[0]+cos_a*sphere_r,hhp[1],hhp[2]+sin_a*sphere_r],
+                                    _=>[hhp[0]+cos_a*sphere_r,hhp[1]+sin_a*sphere_r,hhp[2]],
+                                };
+                                hover_sphere_verts.push(V3d{position:p,color:sphere_color});
+                                hover_sphere_idx.push(base+i as u16);
+                                hover_sphere_idx.push(base+((i+1)%segs) as u16);
+                            }
+                        }
+                }
+                let (hover_sph_vb,hover_sph_ib,hover_sph_ic)=if !hover_sphere_verts.is_empty(){
+                    let vb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("HSV"),contents:bytemuck::cast_slice(&hover_sphere_verts),usage:wgpu::BufferUsages::VERTEX});
+                    let ib=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("HSI"),contents:bytemuck::cast_slice(&hover_sphere_idx),usage:wgpu::BufferUsages::INDEX});
+                    (Some(vb),Some(ib),hover_sphere_idx.len() as u32)
+                }else{(None,None,0)};
+
+                // Build click ray line + hit point cross vertices
                 let mut ray_verts:Vec<V3d>=Vec::new();
                 let mut ray_idx:Vec<u16>=Vec::new();
                 if let Some(hp)=hit_point{
@@ -695,6 +827,42 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     (Some(tvb_2d),Some(tib_2d))
                 }else{(None,None)};
 
+                // Hover ring replaced by sphere above.
+
+                // Build crosshair vertices (small cross at screen center, in world
+                // space as a tiny quad close to camera so it's always visible).
+                let _crosshair_size=0.015f32;
+                let crosshair_dist=0.5f32;
+                let ch_fwd=camera.forward();
+                let ch_right=camera.right();
+                let ch_up=[0.0f32,1.0,0.0];
+                let ch_center=[
+                    camera.pos[0]+ch_fwd[0]*crosshair_dist,
+                    camera.pos[1]+ch_fwd[1]*crosshair_dist,
+                    camera.pos[2]+ch_fwd[2]*crosshair_dist,
+                ];
+                let ch_gap=0.004f32;
+                let ch_arm=0.008f32;
+                let ch_color=[1.0f32,1.0,1.0];
+                // 4 line segments for a crosshair with a gap in the middle
+                let cross_verts:Vec<V3d>=vec![
+                    // horizontal left
+                    V3d{position:[ch_center[0]-ch_right[0]*(ch_gap+ch_arm)+ch_up[0]*0.001,ch_center[1]-ch_right[1]*(ch_gap+ch_arm)+ch_up[1]*0.001,ch_center[2]-ch_right[2]*(ch_gap+ch_arm)+ch_up[2]*0.001],color:ch_color},
+                    V3d{position:[ch_center[0]-ch_right[0]*ch_gap+ch_up[0]*0.001,ch_center[1]-ch_right[1]*ch_gap+ch_up[1]*0.001,ch_center[2]-ch_right[2]*ch_gap+ch_up[2]*0.001],color:ch_color},
+                    // horizontal right
+                    V3d{position:[ch_center[0]+ch_right[0]*ch_gap+ch_up[0]*0.001,ch_center[1]+ch_right[1]*ch_gap+ch_up[1]*0.001,ch_center[2]+ch_right[2]*ch_gap+ch_up[2]*0.001],color:ch_color},
+                    V3d{position:[ch_center[0]+ch_right[0]*(ch_gap+ch_arm)+ch_up[0]*0.001,ch_center[1]+ch_right[1]*(ch_gap+ch_arm)+ch_up[1]*0.001,ch_center[2]+ch_right[2]*(ch_gap+ch_arm)+ch_up[2]*0.001],color:ch_color},
+                    // vertical top
+                    V3d{position:[ch_center[0]-ch_up[0]*(ch_gap+ch_arm)+ch_right[0]*0.001,ch_center[1]-ch_up[1]*(ch_gap+ch_arm)+ch_right[1]*0.001,ch_center[2]-ch_up[2]*(ch_gap+ch_arm)+ch_right[2]*0.001],color:ch_color},
+                    V3d{position:[ch_center[0]-ch_up[0]*ch_gap+ch_right[0]*0.001,ch_center[1]-ch_up[1]*ch_gap+ch_right[1]*0.001,ch_center[2]-ch_up[2]*ch_gap+ch_right[2]*0.001],color:ch_color},
+                    // vertical bottom
+                    V3d{position:[ch_center[0]+ch_up[0]*ch_gap+ch_right[0]*0.001,ch_center[1]+ch_up[1]*ch_gap+ch_right[1]*0.001,ch_center[2]+ch_up[2]*ch_gap+ch_right[2]*0.001],color:ch_color},
+                    V3d{position:[ch_center[0]+ch_up[0]*(ch_gap+ch_arm)+ch_right[0]*0.001,ch_center[1]+ch_up[1]*(ch_gap+ch_arm)+ch_right[1]*0.001,ch_center[2]+ch_up[2]*(ch_gap+ch_arm)+ch_right[2]*0.001],color:ch_color},
+                ];
+                let cross_idx:&[u16]=&[0,1,2,3,4,5,6,7];
+                let cross_vb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("CHV"),contents:bytemuck::cast_slice(&cross_verts),usage:wgpu::BufferUsages::VERTEX});
+                let cross_ib=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("CHI"),contents:bytemuck::cast_slice(cross_idx),usage:wgpu::BufferUsages::INDEX});
+
                 // 3D pass: scene + text
                 {
                     let mut pass=enc.begin_render_pass(&wgpu::RenderPassDescriptor{
@@ -721,6 +889,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     }else{
                         pass.set_vertex_buffer(0,cube_vb_rot.slice(..));pass.set_index_buffer(cube_ib.slice(..),wgpu::IndexFormat::Uint16);
                         pass.draw_indexed(0..cube_i.len() as u32,0,0..1);
+                    }
+
+                    // Hover hit-point sphere (always show when hovering)
+                    if hover_hit_point.is_some(){
+                        if let (Some(hsv),Some(hsi))=(&hover_sph_vb,&hover_sph_ib){
+                            pass.set_pipeline(&line_pipe);
+                            pass.set_bind_group(0,&bg3d,&[]);
+                            pass.set_vertex_buffer(0,hsv.slice(..));
+                            pass.set_index_buffer(hsi.slice(..),wgpu::IndexFormat::Uint16);
+                            pass.draw_indexed(0..hover_sph_ic,0,0..1);
+                        }
+                    }
+
+                    // Crosshair (always visible when mouse is captured)
+                    if mouse_cap{
+                        pass.set_pipeline(&line_pipe);
+                        pass.set_bind_group(0,&bg3d,&[]);
+                        pass.set_vertex_buffer(0,cross_vb.slice(..));
+                        pass.set_index_buffer(cross_ib.slice(..),wgpu::IndexFormat::Uint16);
+                        pass.draw_indexed(0..8,0,0..1);
                     }
 
                     // Ray line + hit point cross
