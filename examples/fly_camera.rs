@@ -441,19 +441,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                      Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("RIB"),contents:bytemuck::cast_slice(&ray_idx),usage:wgpu::BufferUsages::INDEX})))
                 }else{(None,None)};
 
-                // Build text billboard: a 3D quad in world space above the cube
-                // Fixed world-space size: ~2 units wide, ~0.3 units tall
+                // Build 3D extruded text: each character is a box with front/back/sides
+                // Camera is at z=-5 looking toward +Z, text at z=0.
+                // Front face = closer to camera (z - depth/2), back face = further (z + depth/2).
                 let text="Hello World";
-                let text_world_pos=[0.0f32,1.5,0.0]; // above the cube
-                let text_width=2.0f32; // total width in world units
-                let text_height=0.3f32; // total height in world units
+                let text_world_pos=[0.0f32,1.5,0.0];
+                let text_width=2.0f32;
+                let text_height=0.3f32;
+                let text_depth=0.12f32;
                 let char_count=text.len() as f32;
 
-                // No billboarding — text is a fixed 3D quad in world space
-                // Facing +Z direction (toward camera when camera looks at origin)
                 let inv_tw=1.0/atlas.width as f32;
                 let inv_th=1.0/atlas.height as f32;
-                let text_color=[1.0f32,0.9,0.4,1.0];
+                let front_color=[1.0f32,0.9,0.4,1.0];
+                let side_color =[0.7f32,0.6,0.2,1.0];
+                let back_color =[0.4f32,0.3,0.1,1.0];
+
+                let z_near=text_world_pos[2]-text_depth*0.5; // front (toward camera at z=-5)
+                let z_far =text_world_pos[2]+text_depth*0.5; // back  (away from camera)
+                // Small offset to prevent z-fighting between front/back faces and side faces
+                let z_eps = 0.001f32;
+                let z_front = z_near - z_eps; // front face slightly toward camera
+                let z_back  = z_far + z_eps;  // back face slightly away from camera
 
                 let mut text_verts:Vec<TextVert>=Vec::new();
                 let mut text_indices:Vec<u16>=Vec::new();
@@ -463,37 +472,126 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let idx=(ch_byte-32)as u32;
                     let col=idx%atlas.cols;
                     let row=idx/atlas.cols;
-                    let u0=(col*atlas.cell_width)as f32*inv_tw;
-                    let v0=(row*atlas.cell_height)as f32*inv_th;
-                    let u1=((col+1)*atlas.cell_width)as f32*inv_tw;
-                    let v1=((row+1)*atlas.cell_height)as f32*inv_th;
+                     let char_w=text_width/char_count;
+                    let x0=text_world_pos[0]+i as f32*char_w - text_width*0.5;
+                    let y1=text_world_pos[1]+text_height*0.5;
 
-                    // Character quad in world-space (fixed size, facing +Z)
-                    // Use 80% of cell width for the glyph, 20% for spacing
-                    let char_w=text_width/char_count;
-                    let gap=char_w*0.15;
-                    let draw_w=char_w-gap;
-                    let x0=i as f32*char_w - text_width*0.5;
-                    let x1=x0+draw_w;
-                    let y0=-text_height*0.5;
-                    let y1=text_height*0.5;
+                    // Front & back faces — per-pixel quads for opaque pixels only.
+                    // This is critical: transparent pixels must NOT write to the depth
+                    // buffer, otherwise they occlude the side faces of inner edges
+                    // (e.g. the inside of a 'W'). We use the same pixel-sampling
+                    // approach as the sides.
+                    //
+                    // Side faces — for every ON pixel that has an exposed edge
+                    // (neighbor is OFF or out of bounds), emit a quad extruded from
+                    // front to back. This traces the full glyph silhouette including
+                    // inner edges of shapes like 'W', 'A', 'B' — matching how Godot
+                    // TextMesh and Unity TextMeshPro handle 3D text sides.
 
-                    let base=text_verts.len() as u16;
-                    // 4 corners in world space (quad faces -Z, toward camera)
-                    // Rotated 180° on Y axis: negate x and z offsets
-                    let corners=[
-                        [text_world_pos[0]-x0, text_world_pos[1]+y0, text_world_pos[2], u0, v1],
-                        [text_world_pos[0]-x1, text_world_pos[1]+y0, text_world_pos[2], u1, v1],
-                        [text_world_pos[0]-x1, text_world_pos[1]+y1, text_world_pos[2], u1, v0],
-                        [text_world_pos[0]-x0, text_world_pos[1]+y1, text_world_pos[2], u0, v0],
-                    ];
-                    for c in &corners{
-                        text_verts.push(TextVert{position:[c[0],c[1],c[2]],uv:[c[3],c[4]],color:text_color});
+                    let ax0 = col * atlas.cell_width;
+                    let ay0 = row * atlas.cell_height;
+                    let px_w = text_width / char_count / atlas.cell_width as f32;
+                    let px_h = text_height / atlas.cell_height as f32;
+
+                    let pixel_on = |px: i32, py: i32| -> bool {
+                        if px < 0 || py < 0 || px >= atlas.cell_width as i32 || py >= atlas.cell_height as i32 {
+                            return false;
+                        }
+                        let ax = ax0 + px as u32;
+                        let ay = ay0 + py as u32;
+                        let off = ((ay * atlas.width + ax) * 4 + 3) as usize;
+                        *atlas.pixels.get(off).unwrap_or(&0) > 128
+                    };
+
+                    for py in 0..atlas.cell_height {
+                        for px in 0..atlas.cell_width {
+                            if !pixel_on(px as i32, py as i32) { continue; }
+
+                            let wx0 = x0 + px as f32 * px_w;
+                            let wx1 = wx0 + px_w;
+                            let wy1 = y1 - py as f32 * px_h;
+                            let wy0 = wy1 - px_h;
+                            let qu0 = (ax0 + px) as f32 * inv_tw;
+                            let qu1 = (ax0 + px + 1) as f32 * inv_tw;
+                            let qv0 = (ay0 + py) as f32 * inv_th;
+                            let qv1 = (ay0 + py + 1) as f32 * inv_th;
+
+                            // Front face quad for this opaque pixel
+                            {
+                                let base = text_verts.len() as u16;
+                                text_verts.extend_from_slice(&[
+                                    TextVert{position:[wx0, wy0, z_front], uv:[qu0, qv1], color:front_color},
+                                    TextVert{position:[wx1, wy0, z_front], uv:[qu1, qv1], color:front_color},
+                                    TextVert{position:[wx1, wy1, z_front], uv:[qu1, qv0], color:front_color},
+                                    TextVert{position:[wx0, wy1, z_front], uv:[qu0, qv0], color:front_color},
+                                ]);
+                                text_indices.extend_from_slice(&[base, base+1, base+2, base+2, base+3, base]);
+                            }
+
+                            // Back face quad for this opaque pixel
+                            {
+                                let base = text_verts.len() as u16;
+                                text_verts.extend_from_slice(&[
+                                    TextVert{position:[wx1, wy0, z_back], uv:[qu1, qv1], color:back_color},
+                                    TextVert{position:[wx0, wy0, z_back], uv:[qu0, qv1], color:back_color},
+                                    TextVert{position:[wx0, wy1, z_back], uv:[qu0, qv0], color:back_color},
+                                    TextVert{position:[wx1, wy1, z_back], uv:[qu1, qv0], color:back_color},
+                                ]);
+                                text_indices.extend_from_slice(&[base, base+1, base+2, base+2, base+3, base]);
+                            }
+
+                            // Top edge exposed?
+                            if !pixel_on(px as i32, py as i32 - 1) {
+                                let base = text_verts.len() as u16;
+                                text_verts.extend_from_slice(&[
+                                    TextVert{position:[wx0, wy1, z_front], uv:[qu0, qv0], color:side_color},
+                                    TextVert{position:[wx1, wy1, z_front], uv:[qu1, qv0], color:side_color},
+                                    TextVert{position:[wx1, wy1, z_back],  uv:[qu1, qv1], color:side_color},
+                                    TextVert{position:[wx0, wy1, z_back],  uv:[qu0, qv1], color:side_color},
+                                ]);
+                                text_indices.extend_from_slice(&[base, base+1, base+2, base+2, base+3, base]);
+                            }
+
+                            // Bottom edge exposed?
+                            if !pixel_on(px as i32, py as i32 + 1) {
+                                let base = text_verts.len() as u16;
+                                text_verts.extend_from_slice(&[
+                                    TextVert{position:[wx1, wy0, z_front], uv:[qu1, qv1], color:side_color},
+                                    TextVert{position:[wx0, wy0, z_front], uv:[qu0, qv1], color:side_color},
+                                    TextVert{position:[wx0, wy0, z_back],  uv:[qu0, qv0], color:side_color},
+                                    TextVert{position:[wx1, wy0, z_back],  uv:[qu1, qv0], color:side_color},
+                                ]);
+                                text_indices.extend_from_slice(&[base, base+1, base+2, base+2, base+3, base]);
+                            }
+
+                            // Left edge exposed?
+                            if !pixel_on(px as i32 - 1, py as i32) {
+                                let base = text_verts.len() as u16;
+                                text_verts.extend_from_slice(&[
+                                    TextVert{position:[wx0, wy0, z_front], uv:[qu0, qv1], color:side_color},
+                                    TextVert{position:[wx0, wy1, z_front], uv:[qu1, qv1], color:side_color},
+                                    TextVert{position:[wx0, wy1, z_back],  uv:[qu1, qv0], color:side_color},
+                                    TextVert{position:[wx0, wy0, z_back],  uv:[qu0, qv0], color:side_color},
+                                ]);
+                                text_indices.extend_from_slice(&[base, base+1, base+2, base+2, base+3, base]);
+                            }
+
+                            // Right edge exposed?
+                            if !pixel_on(px as i32 + 1, py as i32) {
+                                let base = text_verts.len() as u16;
+                                text_verts.extend_from_slice(&[
+                                    TextVert{position:[wx1, wy1, z_front], uv:[qu1, qv0], color:side_color},
+                                    TextVert{position:[wx1, wy0, z_front], uv:[qu0, qv0], color:side_color},
+                                    TextVert{position:[wx1, wy0, z_back],  uv:[qu0, qv1], color:side_color},
+                                    TextVert{position:[wx1, wy1, z_back],  uv:[qu1, qv1], color:side_color},
+                                ]);
+                                text_indices.extend_from_slice(&[base, base+1, base+2, base+2, base+3, base]);
+                            }
+                        }
                     }
-                    text_indices.extend_from_slice(&[base,base+1,base+2,base+2,base+3,base]);
                 }
 
-                // Write text VP (same as 3D VP)
+                // Write VP to both uniform buffers
                 queue.write_buffer(&tex_ub,0,bytemuck::cast_slice(&vp_gpu));
 
                 // ── Render ────────────────────────────────────────────
@@ -501,7 +599,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 let view=frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 let mut enc=device.create_command_encoder(&wgpu::CommandEncoderDescriptor{label:Some("Frame")});
 
-                // Create text buffers before the pass so they live long enough
+                // Create text buffers (front+back faces, textured)
                 let (tvb,tib)=if !text_verts.is_empty(){
                     let tvb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("TVB"),contents:bytemuck::cast_slice(&text_verts),usage:wgpu::BufferUsages::VERTEX});
                     let tib=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("TIB"),contents:bytemuck::cast_slice(&text_indices),usage:wgpu::BufferUsages::INDEX});
@@ -540,7 +638,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         pass.draw_indexed(0..ray_idx.len() as u32,0,0..1);
                     }
 
-                    // Text billboard
+                    // Text front + back + side faces (all textured via tex_pipe)
                     if let (Some(tvb),Some(tib))=(&tvb,&tib){
                         pass.set_pipeline(&tex_pipe);
                         pass.set_bind_group(0,&tex_bg0,&[]);
