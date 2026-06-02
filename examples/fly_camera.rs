@@ -29,6 +29,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let f=1.0/(fov_y*0.5).tan();let nf=1.0/(near-far);
         [[f/aspect,0.0,0.0,0.0],[0.0,f,0.0,0.0],[0.0,0.0,(far+near)*nf,2.0*far*near*nf],[0.0,0.0,-1.0,0.0]]
     }
+    fn orthographic(size:f32,aspect:f32,near:f32,far:f32)->[[f32;4];4]{
+        let r=size*0.5;let t=r/aspect;let nf=1.0/(near-far);
+        [[1.0/r,0.0,0.0,0.0],[0.0,1.0/t,0.0,0.0],[0.0,0.0,2.0*nf,-(far+near)*nf],[0.0,0.0,0.0,1.0]]
+    }
 
     struct Camera{pos:[f32;3],yaw:f32,pitch:f32}
     impl Camera{
@@ -40,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fn right(&self)->[f32;3]{let(sy,cy)=(self.yaw.sin(),self.yaw.cos());[sy,0.0,-cy]}
     }
 
-    fn build_vp(cam:&Camera,aspect:f32)->[[f32;4];4]{
+    fn build_vp(cam:&Camera,aspect:f32,ortho:bool)->[[f32;4];4]{
         let fwd=cam.forward();
         let target=[cam.pos[0]+fwd[0],cam.pos[1]+fwd[1],cam.pos[2]+fwd[2]];
         let f_dir=normalize(sub(target,cam.pos));
@@ -52,7 +56,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             [-f_dir[0],-f_dir[1],-f_dir[2],dot(f_dir,cam.pos)],
             [0.0,0.0,0.0,1.0],
         ];
-        mul_mat4(perspective(std::f32::consts::FRAC_PI_4,aspect,0.1,100.0),view)
+        if ortho{
+            mul_mat4(orthographic(20.0,aspect,0.1,200.0),view)
+        }else{
+            mul_mat4(perspective(std::f32::consts::FRAC_PI_4,aspect,0.1,100.0),view)
+        }
     }
 
     // ── Init wgpu ──────────────────────────────────────────────────────
@@ -282,6 +290,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mut cube_2d:bool=false;
     let mut hit_point:Option<[f32;3]>=None;
     let mut hover_hit_point:Option<[f32;3]>=None; // hover ray hit point on cube AABB
+    let mut is_ortho:bool=false; // toggled by clicking the ortho cube
+    let mut saved_persp_pos:[f32;3]=[0.0,2.0,5.0]; // saved camera pos before ortho
+    let mut saved_persp_yaw:f32=std::f32::consts::FRAC_PI_2+std::f32::consts::PI;
+    let mut saved_persp_pitch:f32=-0.15;
     let mut mouse_pos:[f32;2]=[640.0,360.0]; // track mouse position in screen pixels
     let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
     window.set_cursor_visible(false);
@@ -291,12 +303,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     println!("╠══════════════════════════════════════════════════╣");
     println!("║  W/S      Move forward / backward                ║");
     println!("║  A/D      Strafe left / right                    ║");
+    println!("║  E/Q      Move up / down                         ║");
     println!("║  Space    Move up    LCtrl  Move down            ║");
     println!("║  Shift    Faster     ESC    Release mouse        ║");
+    println!("║  O          Toggle ortho/perspective             ║");
+    println!("║  .          Log camera position                  ║");
+    println!("║  Click right cube → Toggle ortho/perspective      ║");
     println!("╚══════════════════════════════════════════════════╝");
 
-    // Track ESC key state to avoid repeat toggling
+    // Track key states to avoid repeat toggling
     let mut esc_was_pressed=false;
+    let mut o_was_pressed=false;
+    let mut period_was_pressed=false;
 
     // ── Event loop ─────────────────────────────────────────────────────
     event_loop.run(move|event,el|{
@@ -339,6 +357,49 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                             }
                             esc_was_pressed=pressed;
                         }
+                        KeyCode::KeyO=>{
+                            // Toggle ortho/perspective on press (not repeat)
+                            let pressed=ke.state==ElementState::Pressed;
+                            if pressed && !o_was_pressed{
+                                if is_ortho{
+                                    // Restore perspective camera and re-capture cursor
+                                    camera.pos=saved_persp_pos;
+                                    camera.yaw=saved_persp_yaw;
+                                    camera.pitch=saved_persp_pitch;
+                                    is_ortho=false;
+                                    mouse_cap=true;
+                                    let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+                                    window.set_cursor_visible(false);
+                                    let phys_w=window.inner_size().width as f32;
+                                    let phys_h=window.inner_size().height as f32;
+                                    mouse_pos=[phys_w*0.5,phys_h*0.5];
+                                }else{
+                                    // Save current perspective camera
+                                    saved_persp_pos=camera.pos;
+                                    saved_persp_yaw=camera.yaw;
+                                    saved_persp_pitch=camera.pitch;
+                                    // Teleport to ortho front view and release cursor
+                                    camera.pos=[0.0,0.0,-5.0];
+                                    camera.yaw=-std::f32::consts::FRAC_PI_2;
+                                    camera.pitch=0.0;
+                                    is_ortho=true;
+                                    mouse_cap=false;
+                                    let _=window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                    window.set_cursor_visible(true);
+                                }
+                                eprintln!("DEBUG: O toggled, is_ortho={}",is_ortho);
+                            }
+                            o_was_pressed=pressed;
+                        }
+                        KeyCode::Period=>{
+                            let pressed=ke.state==ElementState::Pressed;
+                            if pressed && !period_was_pressed{
+                                eprintln!("CAMERA: pos=[{:.2},{:.2},{:.2}] yaw={:.4} pitch={:.4} ortho={}",
+                                    camera.pos[0],camera.pos[1],camera.pos[2],
+                                    camera.yaw,camera.pitch,is_ortho);
+                            }
+                            period_was_pressed=pressed;
+                        }
                         _=>match ke.state{ElementState::Pressed=>{keys.insert(key);}ElementState::Released=>{keys.remove(&key);}},
                     }
                 }
@@ -370,10 +431,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     }
                 }
                 WindowEvent::MouseInput{state:ElementState::Pressed,button:MouseButton::Left,..}=>{
-                    let ray_origin=camera.pos;
-                    let ray_dir=if mouse_cap{
+                    let (ray_origin, ray_dir)=if mouse_cap{
                         // Mouse locked: ray from center
-                        camera.forward()
+                        (camera.pos, camera.forward())
                     }else{
                         // Mouse free: ray from cursor position
                         let phys_w=window.inner_size().width as f32;
@@ -381,21 +441,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         // NDC: +X right, +Y up
                         let ndc_x=(mouse_pos[0]/phys_w)*2.0-1.0;
                         let ndc_y=1.0-(mouse_pos[1]/phys_h)*2.0;
-                        // Build ray using the same basis as the view matrix:
-                        // right = cross(fwd, world_up) — matches the view matrix's 's' vector
                         let fwd=camera.forward();
                         let world_up=[0.0f32,1.0,0.0];
                         let right=normalize(cross(fwd,world_up));
                         let up=cross(right,fwd);
-                        let tan_half_fov=(std::f32::consts::FRAC_PI_8).tan();
-                        let aspect=phys_w/phys_h;
-                        normalize([
-                            fwd[0]+right[0]*ndc_x*aspect*tan_half_fov+up[0]*ndc_y*tan_half_fov,
-                            fwd[1]+right[1]*ndc_x*aspect*tan_half_fov+up[1]*ndc_y*tan_half_fov,
-                            fwd[2]+right[2]*ndc_x*aspect*tan_half_fov+up[2]*ndc_y*tan_half_fov,
-                        ])
+                        if is_ortho{
+                            // Ortho: parallel rays from cursor position on near plane
+                            let ortho_size=20.0f32;
+                            let half_w=ortho_size*0.5;
+                            let half_h=half_w/(phys_w/phys_h);
+                            let origin=[
+                                camera.pos[0]+right[0]*ndc_x*half_w+up[0]*ndc_y*half_h,
+                                camera.pos[1]+right[1]*ndc_x*half_w+up[1]*ndc_y*half_h,
+                                camera.pos[2]+right[2]*ndc_x*half_w+up[2]*ndc_y*half_h,
+                            ];
+                            (origin, fwd)
+                        }else{
+                            // Perspective: ray from camera through cursor
+                            let tan_half_fov=(std::f32::consts::FRAC_PI_8).tan();
+                            let aspect=phys_w/phys_h;
+                            let dir=normalize([
+                                fwd[0]+right[0]*ndc_x*aspect*tan_half_fov+up[0]*ndc_y*tan_half_fov,
+                                fwd[1]+right[1]*ndc_x*aspect*tan_half_fov+up[1]*ndc_y*tan_half_fov,
+                                fwd[2]+right[2]*ndc_x*aspect*tan_half_fov+up[2]*ndc_y*tan_half_fov,
+                            ]);
+                            (camera.pos, dir)
+                        }
                     };
-                    // AABB ray intersection with the cube [-0.5,0.5]^3
+                    // Test main cube AABB first
                     let aabb_min=[-0.5f32,-0.5,-0.5];
                     let aabb_max=[0.5f32,0.5,0.5];
                     let mut tmin=f32::NEG_INFINITY;
@@ -419,6 +492,52 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         let hp=[ray_origin[0]+ray_dir[0]*t,ray_origin[1]+ray_dir[1]*t,ray_origin[2]+ray_dir[2]*t];
                         hit_point=Some(hp);
                         cube_2d=!cube_2d;
+                    }else{
+                        // Test ortho cube AABB (centered at [3,0.5,0], size 1)
+                        let ortho_aabb_min=[2.5f32,0.0,-0.5];
+                        let ortho_aabb_max=[3.5f32,1.0,0.5];
+                        let mut tmin2=f32::NEG_INFINITY;
+                        let mut tmax2=f32::INFINITY;
+                        let mut _miss2=false;
+                        for i in 0..3{
+                            if ray_dir[i].abs()<1e-8{
+                                if ray_origin[i]<ortho_aabb_min[i]||ray_origin[i]>ortho_aabb_max[i]{
+                                    _miss2=true;break;
+                                }
+                            }else{
+                                let t1=(ortho_aabb_min[i]-ray_origin[i])/ray_dir[i];
+                                let t2=(ortho_aabb_max[i]-ray_origin[i])/ray_dir[i];
+                                let(tlo,thi)=if t1<t2{(t1,t2)}else{(t2,t1)};
+                                tmin2=tmin2.max(tlo);
+                                tmax2=tmax2.min(thi);
+                            }
+                        }
+                        if !_miss2&&tmin2<=tmax2&&tmax2>0.0{
+                            if is_ortho{
+                                camera.pos=saved_persp_pos;
+                                camera.yaw=saved_persp_yaw;
+                                camera.pitch=saved_persp_pitch;
+                                is_ortho=false;
+                                mouse_cap=true;
+                                let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+                                window.set_cursor_visible(false);
+                                let phys_w=window.inner_size().width as f32;
+                                let phys_h=window.inner_size().height as f32;
+                                mouse_pos=[phys_w*0.5,phys_h*0.5];
+                            }else{
+                                saved_persp_pos=camera.pos;
+                                saved_persp_yaw=camera.yaw;
+                                saved_persp_pitch=camera.pitch;
+                                camera.pos=[0.0,0.0,-5.0];
+                                camera.yaw=-std::f32::consts::FRAC_PI_2;
+                                camera.pitch=0.0;
+                                is_ortho=true;
+                                mouse_cap=false;
+                                let _=window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                window.set_cursor_visible(true);
+                            }
+                            eprintln!("DEBUG: Ortho cube clicked, is_ortho={}",is_ortho);
+                        }
                     }
                 }
                 _=>{}
@@ -443,9 +562,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 if keys.contains(&KeyCode::KeyA){camera.pos[0]+=right[0]*v;camera.pos[1]+=right[1]*v;camera.pos[2]+=right[2]*v;}
                 if keys.contains(&KeyCode::Space){camera.pos[1]+=v;}
                 if keys.contains(&KeyCode::ControlLeft){camera.pos[1]-=v;}
+                if keys.contains(&KeyCode::KeyQ){camera.pos[1]-=v;}
+                if keys.contains(&KeyCode::KeyE){camera.pos[1]+=v;}
 
                 let w=surf_cfg.width as f32;let h=surf_cfg.height as f32;
-                let vp=build_vp(&camera,w/h);
+                let vp=build_vp(&camera,w/h,is_ortho);
                 let vp_gpu=transpose(vp);
                 queue.write_buffer(&ub3d,0,bytemuck::cast_slice(&vp_gpu));
 
@@ -453,57 +574,97 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // Cast a ray from the camera center (or cursor position when
                 // mouse is free) and test against the cube AABB.
                 {
-                    let ray_origin=camera.pos;
-                    let ray_dir=if mouse_cap{
-                        camera.forward()
+                    let (ray_origin, ray_dir)=if mouse_cap{
+                        (camera.pos, camera.forward())
                     }else{
                         let phys_w=surf_cfg.width as f32;
                         let phys_h=surf_cfg.height as f32;
                         let ndc_x=(mouse_pos[0]/phys_w)*2.0-1.0;
                         let ndc_y=1.0-(mouse_pos[1]/phys_h)*2.0;
-                        // Use same basis as view matrix: right = cross(fwd, world_up)
                         let fwd=camera.forward();
                         let world_up=[0.0f32,1.0,0.0];
                         let right=normalize(cross(fwd,world_up));
                         let up=cross(right,fwd);
-                        let tan_half_fov=(std::f32::consts::FRAC_PI_8).tan();
-                        let aspect=phys_w/phys_h;
-                        normalize([
-                            fwd[0]+right[0]*ndc_x*aspect*tan_half_fov+up[0]*ndc_y*tan_half_fov,
-                            fwd[1]+right[1]*ndc_x*aspect*tan_half_fov+up[1]*ndc_y*tan_half_fov,
-                            fwd[2]+right[2]*ndc_x*aspect*tan_half_fov+up[2]*ndc_y*tan_half_fov,
-                        ])
-                    };
-                    // AABB ray intersection with the cube [-0.5,0.5]^3
-                    let aabb_min=[-0.5f32,-0.5,-0.5];
-                    let aabb_max=[0.5f32,0.5,0.5];
-                    let mut tmin=f32::NEG_INFINITY;
-                    let mut tmax=f32::INFINITY;
-                    let mut _miss=false;
-                    for i in 0..3{
-                        if ray_dir[i].abs()<1e-8{
-                            if ray_origin[i]<aabb_min[i]||ray_origin[i]>aabb_max[i]{
-                                _miss=true;break;
-                            }
+                        if is_ortho{
+                            // Ortho: parallel rays from cursor position on near plane
+                            let ortho_size=20.0f32;
+                            let half_w=ortho_size*0.5;
+                            let half_h=half_w/(phys_w/phys_h);
+                            let origin=[
+                                camera.pos[0]+right[0]*ndc_x*half_w+up[0]*ndc_y*half_h,
+                                camera.pos[1]+right[1]*ndc_x*half_w+up[1]*ndc_y*half_h,
+                                camera.pos[2]+right[2]*ndc_x*half_w+up[2]*ndc_y*half_h,
+                            ];
+                            (origin, fwd)
                         }else{
-                            let t1=(aabb_min[i]-ray_origin[i])/ray_dir[i];
-                            let t2=(aabb_max[i]-ray_origin[i])/ray_dir[i];
-                            let(tlo,thi)=if t1<t2{(t1,t2)}else{(t2,t1)};
-                            tmin=tmin.max(tlo);
-                            tmax=tmax.min(thi);
+                            // Perspective: ray from camera through cursor on near plane
+                            let tan_half_fov=(std::f32::consts::FRAC_PI_8).tan();
+                            let aspect=phys_w/phys_h;
+                            let dir=normalize([
+                                fwd[0]+right[0]*ndc_x*aspect*tan_half_fov+up[0]*ndc_y*tan_half_fov,
+                                fwd[1]+right[1]*ndc_x*aspect*tan_half_fov+up[1]*ndc_y*tan_half_fov,
+                                fwd[2]+right[2]*ndc_x*aspect*tan_half_fov+up[2]*ndc_y*tan_half_fov,
+                            ]);
+                            (camera.pos, dir)
+                        }
+                    };
+                    // AABB ray intersection — test both cubes, pick closest hit
+                    let mut best_t=f32::INFINITY;
+                    let mut best_hp=None;
+                    for &(aabb_min,aabb_max) in &[
+                        ([-0.5f32,-0.5,-0.5],[0.5f32,0.5,0.5]),           // main cube
+                        ([2.5f32,0.0,-0.5],[3.5f32,1.0,0.5]),             // ortho cube
+                    ]{
+                        let mut tmin=f32::NEG_INFINITY;
+                        let mut tmax=f32::INFINITY;
+                        let mut miss=false;
+                        for i in 0..3{
+                            if ray_dir[i].abs()<1e-8{
+                                if ray_origin[i]<aabb_min[i]||ray_origin[i]>aabb_max[i]{
+                                    miss=true;break;
+                                }
+                            }else{
+                                let t1=(aabb_min[i]-ray_origin[i])/ray_dir[i];
+                                let t2=(aabb_max[i]-ray_origin[i])/ray_dir[i];
+                                let(tlo,thi)=if t1<t2{(t1,t2)}else{(t2,t1)};
+                                tmin=tmin.max(tlo);
+                                tmax=tmax.min(thi);
+                            }
+                        }
+                        if !miss&&tmin<=tmax&&tmax>0.0{
+                            let t=tmin.max(0.0);
+                            if t<best_t{
+                                best_t=t;
+                                best_hp=Some([
+                                    ray_origin[0]+ray_dir[0]*t,
+                                    ray_origin[1]+ray_dir[1]*t,
+                                    ray_origin[2]+ray_dir[2]*t,
+                                ]);
+                            }
                         }
                     }
-                    if !_miss&&tmin<=tmax&&tmax>0.0{
-                        let t=tmin.max(0.0);
-                        hover_hit_point=Some([
-                            ray_origin[0]+ray_dir[0]*t,
-                            ray_origin[1]+ray_dir[1]*t,
-                            ray_origin[2]+ray_dir[2]*t,
-                        ]);
-                    }else{
-                        hover_hit_point=None;
-                    }
+                    hover_hit_point=best_hp;
                 }
+
+                // ── Ortho cube (right side, toggles ortho/perspective) ──
+                // Positioned at [3.0, 0.5, 0.0], same size as main cube
+                let ortho_hover=hover_hit_point.is_some()&&{
+                    let hp=hover_hit_point.unwrap();
+                    hp[0]>=2.5&&hp[0]<=3.5&&hp[1]>=0.0&&hp[1]<=1.0&&hp[2]>=-0.5&&hp[2]<=0.5
+                };
+                let ortho_mul=if ortho_hover{2.5}else{1.0};
+                let ortho_color=[0.2f32,0.6,1.0]; // blue-ish to distinguish
+                let ortho_verts:Vec<V3d>=cube_v.iter().map(|v|{
+                    let rx=v.position[0]+3.0;
+                    let ry=v.position[1];
+                    let rz=v.position[2];
+                    V3d{position:[rx,ry,rz],color:[
+                        (ortho_color[0]*ortho_mul).min(1.0),
+                        (ortho_color[1]*ortho_mul).min(1.0),
+                        (ortho_color[2]*ortho_mul).min(1.0),
+                    ]}
+                }).collect();
+                let ortho_vb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("OVB"),contents:bytemuck::cast_slice(&ortho_verts),usage:wgpu::BufferUsages::VERTEX});
 
                 // Build rotated cube vertices
                 // When hovering, brighten the cube colors to show the hover state.
@@ -890,6 +1051,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         pass.set_vertex_buffer(0,cube_vb_rot.slice(..));pass.set_index_buffer(cube_ib.slice(..),wgpu::IndexFormat::Uint16);
                         pass.draw_indexed(0..cube_i.len() as u32,0,0..1);
                     }
+
+                    // Ortho cube (right side, click to toggle ortho/perspective)
+                    pass.set_pipeline(&tri_pipe);pass.set_bind_group(0,&bg3d,&[]);
+                    pass.set_vertex_buffer(0,ortho_vb.slice(..));pass.set_index_buffer(cube_ib.slice(..),wgpu::IndexFormat::Uint16);
+                    pass.draw_indexed(0..cube_i.len() as u32,0,0..1);
 
                     // Hover hit-point sphere (always show when hovering)
                     if hover_hit_point.is_some(){
