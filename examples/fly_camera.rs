@@ -441,15 +441,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                      Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("RIB"),contents:bytemuck::cast_slice(&ray_idx),usage:wgpu::BufferUsages::INDEX})))
                 }else{(None,None)};
 
-                // Build 3D extruded text: each character is a box with front/back/sides
-                // Camera is at z=-5 looking toward +Z, text at z=0.
-                // Front face = closer to camera (z - depth/2), back face = further (z + depth/2).
+                // Build 3D extruded text: each character is built from per-pixel quads
+                // for the glyph's opaque pixels only. Side faces trace the glyph
+                // silhouette. Characters are spaced with a small gap to prevent touching.
                 let text="Hello World";
                 let text_world_pos=[0.0f32,1.5,0.0];
-                let text_width=2.0f32;
-                let text_height=0.3f32;
-                let text_depth=0.12f32;
                 let char_count=text.len() as f32;
+                // Use square pixels to preserve the font's aspect ratio.
+                // The glyph is 5×7 pixels; we size by the larger dimension so pixels are square.
+                let glyph_aspect = 5.0f32 / 7.0f32; // width/height of glyph in pixels
+                let char_gap = 0.03f32; // gap between characters in world units
+                let total_gaps = char_gap * (char_count - 1.0).max(0.0);
+                // Height drives the size; width follows from glyph aspect ratio
+                let text_height = 0.25f32;
+                let char_h = text_height;
+                let char_w = char_h * glyph_aspect; // square pixels: 5 wide × 7 tall
+                let text_width = char_w * char_count + total_gaps;
+                // Depth proportional to character height
+                let text_depth = text_height * 0.15f32;
 
                 let inv_tw=1.0/atlas.width as f32;
                 let inv_th=1.0/atlas.height as f32;
@@ -457,12 +466,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 let side_color =[0.7f32,0.6,0.2,1.0];
                 let back_color =[0.4f32,0.3,0.1,1.0];
 
-                let z_near=text_world_pos[2]-text_depth*0.5; // front (toward camera at z=-5)
-                let z_far =text_world_pos[2]+text_depth*0.5; // back  (away from camera)
-                // Small offset to prevent z-fighting between front/back faces and side faces
+                let z_near=text_world_pos[2]-text_depth*0.5;
+                let z_far =text_world_pos[2]+text_depth*0.5;
                 let z_eps = 0.001f32;
-                let z_front = z_near - z_eps; // front face slightly toward camera
-                let z_back  = z_far + z_eps;  // back face slightly away from camera
+                let z_front = z_near - z_eps;
+                let z_back  = z_far + z_eps;
 
                 let mut text_verts:Vec<TextVert>=Vec::new();
                 let mut text_indices:Vec<u16>=Vec::new();
@@ -472,8 +480,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let idx=(ch_byte-32)as u32;
                     let col=idx%atlas.cols;
                     let row=idx/atlas.cols;
-                     let char_w=text_width/char_count;
-                    let x0=text_world_pos[0]+i as f32*char_w - text_width*0.5;
+                    // Character x position: each char gets char_w + gap, centered
+                    let x0=text_world_pos[0]+i as f32*(char_w+char_gap) - text_width*0.5 - total_gaps*0.5;
                     let y1=text_world_pos[1]+text_height*0.5;
 
                     // Front & back faces — per-pixel quads for opaque pixels only.
@@ -487,34 +495,45 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     // front to back. This traces the full glyph silhouette including
                     // inner edges of shapes like 'W', 'A', 'B' — matching how Godot
                     // TextMesh and Unity TextMeshPro handle 3D text sides.
+                    //
+                    // The glyph is 5×7 pixels scaled to fill the cell. We iterate over
+                    // the 5×7 glyph pixels (not the full cell) and compute world-space
+                    // size from the glyph dimensions so the geometry tightly fits.
 
-                    let ax0 = col * atlas.cell_width;
+                    let ax0 = col * atlas.cell_width; // atlas pixel origin of this cell
                     let ay0 = row * atlas.cell_height;
-                    let px_w = text_width / char_count / atlas.cell_width as f32;
-                    let px_h = text_height / atlas.cell_height as f32;
+                    let glyph_w = 5u32; // glyph is 5 pixels wide
+                    let glyph_h = 7u32; // glyph is 7 pixels high
+                    let glyph_px_w = char_w / glyph_w as f32; // world units per glyph pixel (x)
+                    let glyph_px_h = text_height / glyph_h as f32; // world units per glyph pixel (y)
 
-                    let pixel_on = |px: i32, py: i32| -> bool {
-                        if px < 0 || py < 0 || px >= atlas.cell_width as i32 || py >= atlas.cell_height as i32 {
+                    // Sample the atlas at glyph pixel (gx, gy). The glyph pixel maps
+                    // to atlas pixels [gx*sx .. (gx+1)*sx) × [gy*sy .. (gy+1)*sy).
+                    let sx = atlas.cell_width / glyph_w;
+                    let sy = atlas.cell_height / glyph_h;
+                    let glyph_pixel_on = |gx: i32, gy: i32| -> bool {
+                        if gx < 0 || gy < 0 || gx >= glyph_w as i32 || gy >= glyph_h as i32 {
                             return false;
                         }
-                        let ax = ax0 + px as u32;
-                        let ay = ay0 + py as u32;
+                        // Sample the center of the glyph pixel region in the atlas
+                        let ax = ax0 + (gx as u32) * sx + sx / 2;
+                        let ay = ay0 + (gy as u32) * sy + sy / 2;
                         let off = ((ay * atlas.width + ax) * 4 + 3) as usize;
                         *atlas.pixels.get(off).unwrap_or(&0) > 128
                     };
 
-                    for py in 0..atlas.cell_height {
-                        for px in 0..atlas.cell_width {
-                            if !pixel_on(px as i32, py as i32) { continue; }
+                    for gy in 0..glyph_h {
+                        for gx in 0..glyph_w {
+                            if !glyph_pixel_on(gx as i32, gy as i32) { continue; }
 
-                            let wx0 = x0 + px as f32 * px_w;
-                            let wx1 = wx0 + px_w;
-                            let wy1 = y1 - py as f32 * px_h;
-                            let wy0 = wy1 - px_h;
-                            let qu0 = (ax0 + px) as f32 * inv_tw;
-                            let qu1 = (ax0 + px + 1) as f32 * inv_tw;
-                            let qv0 = (ay0 + py) as f32 * inv_th;
-                            let qv1 = (ay0 + py + 1) as f32 * inv_th;
+                            let wx0 = x0 + gx as f32 * glyph_px_w;
+                            let wx1 = wx0 + glyph_px_w;
+                            let wy1 = y1 - gy as f32 * glyph_px_h;
+                            let wy0 = wy1 - glyph_px_h;
+                            let qu0 = (ax0 + gx as u32 * sx) as f32 * inv_tw;
+                            let qu1 = (ax0 + (gx + 1) as u32 * sx) as f32 * inv_tw;
+                            let qv0 = (ay0 + gy as u32 * sy) as f32 * inv_th;
+                            let qv1 = (ay0 + (gy + 1) as u32 * sy) as f32 * inv_th;
 
                             // Front face quad for this opaque pixel
                             {
@@ -541,7 +560,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                             }
 
                             // Top edge exposed?
-                            if !pixel_on(px as i32, py as i32 - 1) {
+                            if !glyph_pixel_on(gx as i32, gy as i32 - 1) {
                                 let base = text_verts.len() as u16;
                                 text_verts.extend_from_slice(&[
                                     TextVert{position:[wx0, wy1, z_front], uv:[qu0, qv0], color:side_color},
@@ -553,7 +572,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                             }
 
                             // Bottom edge exposed?
-                            if !pixel_on(px as i32, py as i32 + 1) {
+                            if !glyph_pixel_on(gx as i32, gy as i32 + 1) {
                                 let base = text_verts.len() as u16;
                                 text_verts.extend_from_slice(&[
                                     TextVert{position:[wx1, wy0, z_front], uv:[qu1, qv1], color:side_color},
@@ -565,7 +584,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                             }
 
                             // Left edge exposed?
-                            if !pixel_on(px as i32 - 1, py as i32) {
+                            if !glyph_pixel_on(gx as i32 - 1, gy as i32) {
                                 let base = text_verts.len() as u16;
                                 text_verts.extend_from_slice(&[
                                     TextVert{position:[wx0, wy0, z_front], uv:[qu0, qv1], color:side_color},
@@ -577,7 +596,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                             }
 
                             // Right edge exposed?
-                            if !pixel_on(px as i32 + 1, py as i32) {
+                            if !glyph_pixel_on(gx as i32 + 1, gy as i32) {
                                 let base = text_verts.len() as u16;
                                 text_verts.extend_from_slice(&[
                                     TextVert{position:[wx1, wy1, z_front], uv:[qu1, qv0], color:side_color},
