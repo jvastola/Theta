@@ -444,7 +444,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 // Build 3D extruded text: each character is built from per-pixel quads
                 // for the glyph's opaque pixels only. Side faces trace the glyph
                 // silhouette. Characters are spaced with a small gap to prevent touching.
-                let text="Hello World";
+                let text="ABCDEFGHIKLMNOPQRSTUVWXYZ0123456789abcdefghiklmnopqrstuvwxyz!?@#$%^&*()-=_+[]{}|;:,.<>~";
                 let text_world_pos=[0.0f32,1.5,0.0];
                 let char_count=text.len() as f32;
                 // Use square pixels to preserve the font's aspect ratio.

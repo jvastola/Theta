@@ -2,6 +2,10 @@
 
 Theta Engine is a Rust-native VR-first game engine & mesh authoring platform focused on high-performance rendering, ergonomic mesh tools, and networked collaboration. This repository contains architecture, scaffolding, and tests for the engine and editor runtime.
 
+## Screenshot
+
+![Theta Engine 3D Text](docs/screenshot.png)
+
 ## Current Status (May 31, 2026)
 
 **Phase 4:** Complete (Command Log & Conflict Resolution)  
