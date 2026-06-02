@@ -279,6 +279,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mut mouse_cap=true;
     let mut last_frame=std::time::Instant::now();
     let mut cube_rot_y:f32=0.0;
+    let mut cube_2d:bool=false;
     let mut hit_point:Option<[f32;3]>=None;
     let mut mouse_pos:[f32;2]=[640.0,360.0]; // track mouse position in screen pixels
     let _=window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
@@ -383,7 +384,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         let t=(-b-disc.sqrt())/(2.0*a);
                         if t>0.0{
                             hit_point=Some([ray_origin[0]+ray_dir[0]*t,ray_origin[1]+ray_dir[1]*t,ray_origin[2]+ray_dir[2]*t]);
-                            cube_rot_y+=std::f32::consts::FRAC_PI_2;
+                            cube_2d=!cube_2d;
                         }
                     }
                 }
@@ -418,6 +419,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     V3d{position:[rx,v.position[1],rz],color:v.color}
                 }).collect();
                 let cube_vb_rot=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("CVR"),contents:bytemuck::cast_slice(&cube_verts_rot),usage:wgpu::BufferUsages::VERTEX});
+
+                // 2D mode: a single flat quad facing the camera, dark gold color
+                let dark_gold=[0.7f32,0.6,0.2];
+                let quad_2d_verts:Vec<V3d>=vec![
+                    V3d{position:[-0.5,-0.5,0.0],color:dark_gold},
+                    V3d{position:[0.5,-0.5,0.0],color:dark_gold},
+                    V3d{position:[0.5,0.5,0.0],color:dark_gold},
+                    V3d{position:[-0.5,0.5,0.0],color:dark_gold},
+                ];
+                let quad_2d_idx:&[u16]=&[0,2,1,0,3,2];
+                let quad_2d_vb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("Q2V"),contents:bytemuck::cast_slice(&quad_2d_verts),usage:wgpu::BufferUsages::VERTEX});
+                let quad_2d_ib=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("Q2I"),contents:bytemuck::cast_slice(quad_2d_idx),usage:wgpu::BufferUsages::INDEX});
 
                 // Build ray line + hit point cross vertices
                 let mut ray_verts:Vec<V3d>=Vec::new();
@@ -610,6 +623,56 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     }
                 }
 
+                // Build 2D text: flat textured quads at z=0 (no extrusion)
+                let text_2d_color=[1.0f32,0.9,0.4,1.0];
+                let z_2d = 0.001f32; // slightly in front of the quad to avoid z-fighting
+                let mut text_2d_verts:Vec<TextVert>=Vec::new();
+                let mut text_2d_indices:Vec<u16>=Vec::new();
+                for(i,ch_byte) in text.bytes().enumerate(){
+                    let ch_byte=if ch_byte>=32&&ch_byte<127{ch_byte}else{b'?'};
+                    let idx=(ch_byte-32)as u32;
+                    let col=idx%atlas.cols;
+                    let row=idx/atlas.cols;
+                    let x0=text_world_pos[0]+i as f32*(char_w+char_gap) - text_width*0.5 - total_gaps*0.5;
+                    let y1=text_world_pos[1]+text_height*0.5;
+                    let ax0 = col * atlas.cell_width;
+                    let ay0 = row * atlas.cell_height;
+                    let glyph_w = 5u32;
+                    let glyph_h = 7u32;
+                    let glyph_px_w = char_w / glyph_w as f32;
+                    let glyph_px_h = text_height / glyph_h as f32;
+                    let sx = atlas.cell_width / glyph_w;
+                    let sy = atlas.cell_height / glyph_h;
+                    let glyph_pixel_on = |gx: i32, gy: i32| -> bool {
+                        if gx < 0 || gy < 0 || gx >= glyph_w as i32 || gy >= glyph_h as i32 { return false; }
+                        let ax = ax0 + (gx as u32) * sx + sx / 2;
+                        let ay = ay0 + (gy as u32) * sy + sy / 2;
+                        let off = ((ay * atlas.width + ax) * 4 + 3) as usize;
+                        *atlas.pixels.get(off).unwrap_or(&0) > 128
+                    };
+                    for gy in 0..glyph_h {
+                        for gx in 0..glyph_w {
+                            if !glyph_pixel_on(gx as i32, gy as i32) { continue; }
+                            let wx0 = x0 + gx as f32 * glyph_px_w;
+                            let wx1 = wx0 + glyph_px_w;
+                            let wy1 = y1 - gy as f32 * glyph_px_h;
+                            let wy0 = wy1 - glyph_px_h;
+                            let qu0 = (ax0 + gx as u32 * sx) as f32 * inv_tw;
+                            let qu1 = (ax0 + (gx + 1) as u32 * sx) as f32 * inv_tw;
+                            let qv0 = (ay0 + gy as u32 * sy) as f32 * inv_th;
+                            let qv1 = (ay0 + (gy + 1) as u32 * sy) as f32 * inv_th;
+                            let base = text_2d_verts.len() as u16;
+                            text_2d_verts.extend_from_slice(&[
+                                TextVert{position:[wx0, wy0, z_2d], uv:[qu0, qv1], color:text_2d_color},
+                                TextVert{position:[wx1, wy0, z_2d], uv:[qu1, qv1], color:text_2d_color},
+                                TextVert{position:[wx1, wy1, z_2d], uv:[qu1, qv0], color:text_2d_color},
+                                TextVert{position:[wx0, wy1, z_2d], uv:[qu0, qv0], color:text_2d_color},
+                            ]);
+                            text_2d_indices.extend_from_slice(&[base, base+2, base+1, base, base+3, base+2]);
+                        }
+                    }
+                }
+
                 // Write VP to both uniform buffers
                 queue.write_buffer(&tex_ub,0,bytemuck::cast_slice(&vp_gpu));
 
@@ -623,6 +686,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     let tvb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("TVB"),contents:bytemuck::cast_slice(&text_verts),usage:wgpu::BufferUsages::VERTEX});
                     let tib=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("TIB"),contents:bytemuck::cast_slice(&text_indices),usage:wgpu::BufferUsages::INDEX});
                     (Some(tvb),Some(tib))
+                }else{(None,None)};
+
+                // Create 2D text buffers (flat textured quads)
+                let (tvb_2d,tib_2d)=if !text_2d_verts.is_empty(){
+                    let tvb_2d=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("TVB2D"),contents:bytemuck::cast_slice(&text_2d_verts),usage:wgpu::BufferUsages::VERTEX});
+                    let tib_2d=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("TIB2D"),contents:bytemuck::cast_slice(&text_2d_indices),usage:wgpu::BufferUsages::INDEX});
+                    (Some(tvb_2d),Some(tib_2d))
                 }else{(None,None)};
 
                 // 3D pass: scene + text
@@ -643,10 +713,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     pass.set_vertex_buffer(0,grid_vb.slice(..));pass.set_index_buffer(grid_ib.slice(..),wgpu::IndexFormat::Uint16);
                     pass.draw_indexed(0..grid_ic,0,0..1);
 
-                    // Cube (rotated)
+                    // Cube: 3D rotated or 2D flat quad
                     pass.set_pipeline(&tri_pipe);pass.set_bind_group(0,&bg3d,&[]);
-                    pass.set_vertex_buffer(0,cube_vb_rot.slice(..));pass.set_index_buffer(cube_ib.slice(..),wgpu::IndexFormat::Uint16);
-                    pass.draw_indexed(0..cube_i.len() as u32,0,0..1);
+                    if cube_2d{
+                        pass.set_vertex_buffer(0,quad_2d_vb.slice(..));pass.set_index_buffer(quad_2d_ib.slice(..),wgpu::IndexFormat::Uint16);
+                        pass.draw_indexed(0..6,0,0..1);
+                    }else{
+                        pass.set_vertex_buffer(0,cube_vb_rot.slice(..));pass.set_index_buffer(cube_ib.slice(..),wgpu::IndexFormat::Uint16);
+                        pass.draw_indexed(0..cube_i.len() as u32,0,0..1);
+                    }
 
                     // Ray line + hit point cross
                     if let (Some(rvb),Some(rib))=(&ray_vb,&ray_ib){
@@ -657,14 +732,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         pass.draw_indexed(0..ray_idx.len() as u32,0,0..1);
                     }
 
-                    // Text front + back + side faces (all textured via tex_pipe)
-                    if let (Some(tvb),Some(tib))=(&tvb,&tib){
-                        pass.set_pipeline(&tex_pipe);
-                        pass.set_bind_group(0,&tex_bg0,&[]);
-                        pass.set_bind_group(1,&tex_bg1,&[]);
-                        pass.set_vertex_buffer(0,tvb.slice(..));
-                        pass.set_index_buffer(tib.slice(..),wgpu::IndexFormat::Uint16);
-                        pass.draw_indexed(0..text_indices.len() as u32,0,0..1);
+                    // Text: 3D extruded or 2D flat
+                    if cube_2d{
+                        if let (Some(tvb_2d),Some(tib_2d))=(&tvb_2d,&tib_2d){
+                            pass.set_pipeline(&tex_pipe);
+                            pass.set_bind_group(0,&tex_bg0,&[]);
+                            pass.set_bind_group(1,&tex_bg1,&[]);
+                            pass.set_vertex_buffer(0,tvb_2d.slice(..));
+                            pass.set_index_buffer(tib_2d.slice(..),wgpu::IndexFormat::Uint16);
+                            pass.draw_indexed(0..text_2d_indices.len() as u32,0,0..1);
+                        }
+                    }else{
+                        if let (Some(tvb),Some(tib))=(&tvb,&tib){
+                            pass.set_pipeline(&tex_pipe);
+                            pass.set_bind_group(0,&tex_bg0,&[]);
+                            pass.set_bind_group(1,&tex_bg1,&[]);
+                            pass.set_vertex_buffer(0,tvb.slice(..));
+                            pass.set_index_buffer(tib.slice(..),wgpu::IndexFormat::Uint16);
+                            pass.draw_indexed(0..text_indices.len() as u32,0,0..1);
+                        }
                     }
                 }
 
