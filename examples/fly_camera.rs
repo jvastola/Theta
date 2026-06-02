@@ -274,7 +274,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     });
 
     // ── App state ──────────────────────────────────────────────────────
-    let mut camera=Camera{pos:[0.0,2.0,-5.0],yaw:std::f32::consts::FRAC_PI_2,pitch:-0.15};
+    let mut camera=Camera{pos:[0.0,2.0,5.0],yaw:std::f32::consts::FRAC_PI_2+std::f32::consts::PI,pitch:-0.15};
     let mut keys=std::collections::HashSet::<KeyCode>::new();
     let mut mouse_cap=true;
     let mut last_frame=std::time::Instant::now();
