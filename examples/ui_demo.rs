@@ -234,51 +234,79 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
     let cell_z=-5.0f32;
     let cube_half=key_w*0.45; // cube half-extent (slightly smaller than key)
 
-    // QWERTY rows (top to bottom).  Each tuple: (label, x_offset_in_key_units).
-    // Row 0 is the number row, row 4 is the spacebar row.
-    let qwerty_rows:&[&[( &str,f32)]]=&[
-        &[("1",0.0),("2",1.0),("3",2.0),("4",3.0),("5",4.0),("6",5.0),("7",6.0),("8",7.0),("9",8.0),("0",9.0)],
-        &[("Q",0.0),("W",1.0),("E",2.0),("R",3.0),("T",4.0),("Y",5.0),("U",6.0),("I",7.0),("O",8.0),("P",9.0)],
-        &[("A",0.0),("S",1.0),("D",2.0),("F",3.0),("G",4.0),("H",5.0),("J",6.0),("K",7.0),("L",8.0)],
-        &[("Z",0.0),("X",1.0),("C",2.0),("V",3.0),("B",4.0),("N",5.0),("M",6.0)],
-        &[("_",0.0)],  // spacebar placeholder
+    // QWERTY rows (top to bottom).  Each tuple: (label, x_offset_in_key_units, width_in_key_units).
+    // Width defaults to 1.0 if not specified.
+    let qwerty_rows:&[&[(&str,f32,f32)]]=&[
+        // Row 0: number row + backspace (wide)
+        &[("`",0.0,1.0),("1",1.0,1.0),("2",2.0,1.0),("3",3.0,1.0),("4",4.0,1.0),("5",5.0,1.0),("6",6.0,1.0),("7",7.0,1.0),("8",8.0,1.0),("9",9.0,1.0),("0",10.0,1.0),("-",11.0,1.0),("=",12.0,1.0),("BS",13.0,2.0)],
+        // Row 1: tab + Q-P + backslash
+        &[("Tab",0.0,1.5),("Q",1.5,1.0),("W",2.5,1.0),("E",3.5,1.0),("R",4.5,1.0),("T",5.5,1.0),("Y",6.5,1.0),("U",7.5,1.0),("I",8.5,1.0),("O",9.5,1.0),("P",10.5,1.0),("[",11.5,1.0),("]",12.5,1.0),("\\",13.5,1.5)],
+        // Row 2: caps + A-L + enter
+        &[("Caps",0.0,1.7),("A",1.7,1.0),("S",2.7,1.0),("D",3.7,1.0),("F",4.7,1.0),("G",5.7,1.0),("H",6.7,1.0),("J",7.7,1.0),("K",8.7,1.0),("L",9.7,1.0),(";",10.7,1.0),("'",11.7,1.0),("Ent",12.7,2.3)],
+        // Row 3: shift + Z-M + shift
+        &[("Shift",0.0,2.2),("Z",2.2,1.0),("X",3.2,1.0),("C",4.2,1.0),("V",5.2,1.0),("B",6.2,1.0),("N",7.2,1.0),("M",8.2,1.0),(",",9.2,1.0),(".",10.2,1.0),("/",11.2,1.0),("Shft",12.2,2.8)],
+        // Row 4: bottom row with space
+        &[("Ctrl",0.0,1.5),("Win",1.5,1.0),("Alt",2.5,1.0),("Space",3.5,6.0),("Alt",9.5,1.0),("Fn",10.5,1.0),("Ctrl",11.5,1.5)],
     ];
-    // Row offsets (in key units) so the rows look like a real keyboard
-    let row_offsets:&[f32]=&[0.0,0.0,0.0,0.0,0.0];
     let row_count=qwerty_rows.len();
 
     // Compute the world-space center of each key and the total bounds.
-    // First find the max row width in key units.
-    let max_row_width=qwerty_rows.iter().enumerate().map(|(ri,row)|{
+    let max_row_width=qwerty_rows.iter().map(|row|{
         let last=row.last().unwrap();
-        row_offsets[ri]+last.1+1.0
+        last.1+last.2
     }).fold(0.0f32,f32::max);
     let center_x=0.0f32;
     let center_y=0.0f32;
-    // Build a flat list of keys: (label, cx, cy, row_index, col_index)
+    // Build a flat list of keys: (label, cx, cy, half_w, half_h, row, col)
     #[allow(dead_code)]
-    struct KeyInfo{label:&'static str,cx:f32,cy:f32,row:usize,col:usize}
+    struct KeyInfo{label:&'static str,cx:f32,cy:f32,half_w:f32,half_h:f32,row:usize,col:usize}
     let mut key_list:Vec<KeyInfo>=Vec::new();
     for (ri,row) in qwerty_rows.iter().enumerate(){
-        let row_width=row.last().map(|(_,x)|row_offsets[ri]+x+1.0).unwrap_or(1.0);
+        let row_width=row.last().map(|(_,x,w)|x+w).unwrap_or(1.0);
         let row_start_x=center_x-(row_width*key_step)*0.5+key_w*0.5;
         let row_y=center_y-((ri as f32)*key_step-key_w*0.5);
-        for (ci,(_label,x_off)) in row.iter().enumerate(){
-            let cx=row_start_x+(row_offsets[ri]+*x_off)*key_step;
-            key_list.push(KeyInfo{label:_label,cx,cy:row_y,row:ri,col:ci});
+        for (ci,(_label,x_off,width)) in row.iter().enumerate(){
+            let kw=width*key_w; // actual key width
+            let kh=key_w;       // key height stays uniform
+            let cx=row_start_x+x_off*key_step+kw*0.5;
+            key_list.push(KeyInfo{label:_label,cx,cy:row_y,half_w:kw*0.5,half_h:kh*0.5,row:ri,col:ci});
         }
     }
     let key_count=key_list.len();
 
-    // Total extent for the ortho rect
+    // Total extent for the ortho rect — match the keyboard bounds exactly
     let total_w=max_row_width*key_step;
-    let total_h=row_count as f32*key_step;
+    let _total_h=row_count as f32*key_step;
+
+    // Compute the keyboard's actual bounding box.
+    // Row 0 is at the top (highest Y), row (row_count-1) at the bottom.
+    // Each key center is at row_y, with half_h = key_w*0.5.
+    // row_y[0] = -(0*key_step - key_w*0.5) = key_w*0.5
+    // row_y[last] = -((row_count-1)*key_step - key_w*0.5)
+    let row0_center=key_w*0.5;                  // = -(0 - key_w/2)
+    let row_last_center=-((row_count as f32-1.0)*key_step-key_w*0.5);
+    let key_top=row0_center+key_w*0.5;          // top edge of top row
+    let key_bot=row_last_center-key_w*0.5;      // bottom edge of bottom row
+    let key_h=key_top-key_bot;                  // total keyboard height
+    let key_cy=(key_top+key_bot)*0.5;           // keyboard center Y
+
+    // ── Ortho camera sizing ──────────────────────────────────────────
+    // Center the ortho camera on the keyboard and match its aspect ratio.
+    // orthographic(size, aspect, near, far) maps:
+    //   X: [-size/2, size/2] → clip [-1,1]
+    //   Y: [-size/(2*aspect), size/(2*aspect)] → clip [-1,1]
+    let ortho_pad=1.05f32; // 5% padding
+    let ortho_half_x=(total_w*0.5)*ortho_pad;
+    let ortho_half_y=(key_h*0.5)*ortho_pad;
+    let ortho_size=ortho_half_x*2.0;
+    let ortho_aspect=ortho_half_x/ortho_half_y;
 
     // ── Window plane (above the keyboard) ─────────────────────────────
     let plane_z=cell_z-0.5;
-    let plane_hx=total_w*0.55;
-    let plane_hy=total_h*0.55;
-    let plane_y=key_w+0.15+plane_hy; // sit above the top row with a gap
+    // Plane matches the ortho camera's view frustum exactly, centered on keyboard
+    let plane_hx=ortho_half_x;
+    let plane_hy=ortho_half_y;
+    let plane_y=key_top+0.2+plane_hy; // sit above the top of the keyboard
 
     // ── App state ──────────────────────────────────────────────────────
     let mut camera=Camera{pos:[0.0,0.5,3.0],yaw:-std::f32::consts::FRAC_PI_2,pitch:0.15};
@@ -293,6 +321,7 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
     let mut hovered_key:Option<usize>=None;
     let mut clicked_key:Option<usize>=None;
     let mut click_count=0u32;
+    let mut typed_text=String::new();
 
     println!("╔══════════════════════════════════════════════════╗");
     println!("║          Theta Engine – UI Demo (QWERTY)         ║");
@@ -385,7 +414,18 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
                 }
                 WindowEvent::CursorMoved{position,..}=>{let s=window.scale_factor() as f32;mouse_pos=[position.x as f32/s,position.y as f32/s];}
                 WindowEvent::MouseInput{state:ElementState::Pressed,button:MouseButton::Left,..}=>{
-                    if let Some(ki)=hovered_key{click_count+=1;clicked_key=Some(ki);println!("Clicked '{}' count={}",key_list[ki].label,click_count);}
+                    if let Some(ki)=hovered_key{
+                        click_count+=1;clicked_key=Some(ki);
+                        let label=key_list[ki].label;
+                        match label{
+                            "BS"=>{typed_text.pop();}
+                            "Ent"=>{typed_text.push('\n');}
+                            "Space"=>{typed_text.push(' ');}
+                            "Tab"=>{typed_text.push('\t');}
+                            _=>{if label.len()==1{typed_text.push(label.chars().next().unwrap());}}
+                        }
+                        println!("Clicked '{}' count={} text={:?}",label,click_count,typed_text);
+                    }
                 }
                 WindowEvent::MouseInput{state:ElementState::Released,button:MouseButton::Left,..}=>{clicked_key=None;}
                 _=>{}
@@ -413,10 +453,18 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
 
                 // ── Step 1: Render ortho view to texture ──────────────
                 {
-                    let ortho_cam=Camera{pos:[0.0,0.0,0.0],yaw:-std::f32::consts::FRAC_PI_2,pitch:0.0};
-                    let ortho_vp=build_vp(&ortho_cam,1.0,true);
-                    let ortho_ub=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("OUB"),contents:bytemuck::cast_slice(&transpose(ortho_vp)),usage:wgpu::BufferUsages::UNIFORM});
-                    queue.write_buffer(&text_ub,0,bytemuck::cast_slice(&transpose(ortho_vp)));
+                    // Ortho camera centered on the keyboard's actual bounding box
+                    let ortho_cam=Camera{pos:[0.0,key_cy,0.0],yaw:-std::f32::consts::FRAC_PI_2,pitch:0.0};
+                    let fwd=ortho_cam.forward();
+                    let target=[ortho_cam.pos[0]+fwd[0],ortho_cam.pos[1]+fwd[1],ortho_cam.pos[2]+fwd[2]];
+                    let f_dir=normalize(sub(target,ortho_cam.pos));
+                    let s=normalize(cross(f_dir,[0.0,1.0,0.0]));
+                    let u=cross(s,f_dir);
+                    let view=[[s[0],s[1],s[2],-dot(s,ortho_cam.pos)],[u[0],u[1],u[2],-dot(u,ortho_cam.pos)],[-f_dir[0],-f_dir[1],-f_dir[2],dot(f_dir,ortho_cam.pos)],[0.0,0.0,0.0,1.0]];
+                    let ortho_proj=mul_mat4(orthographic(ortho_size,ortho_aspect,-10.0,10.0),view);
+                    let ortho_vp=transpose(ortho_proj);
+                    let ortho_ub=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("OUB"),contents:bytemuck::cast_slice(&ortho_vp),usage:wgpu::BufferUsages::UNIFORM});
+                    queue.write_buffer(&text_ub,0,bytemuck::cast_slice(&ortho_vp));
                     let ortho_bgl=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("OBGL"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::VERTEX,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},count:None}]});
                     let ortho_bg=device.create_bind_group(&wgpu::BindGroupDescriptor{label:Some("OBG"),layout:&ortho_bgl,entries:&[wgpu::BindGroupEntry{binding:0,resource:ortho_ub.as_entire_binding()}]});
                     let ortho_pll=device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("OPLL"),bind_group_layouts:&[&ortho_bgl],push_constant_ranges:&[]});
@@ -433,24 +481,26 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
                         let is_h=hovered_key==Some(ki);
                         let is_c=clicked_key==Some(ki);
                         let bc=if is_c{[0.0f32,0.9,0.0]}else if is_h{[0.0,0.7,0.0]}else{[0.2,0.5,0.2]};
-                        let h=key_half;
                         let b=o_verts.len() as u16;
-                        o_verts.extend_from_slice(&[V3d{position:[k.cx-h,k.cy-h,cell_z],color:bc},V3d{position:[k.cx+h,k.cy-h,cell_z],color:bc},V3d{position:[k.cx+h,k.cy+h,cell_z],color:bc},V3d{position:[k.cx-h,k.cy+h,cell_z],color:bc}]);
+                        o_verts.extend_from_slice(&[V3d{position:[k.cx-k.half_w,k.cy-k.half_h,cell_z],color:bc},V3d{position:[k.cx+k.half_w,k.cy-k.half_h,cell_z],color:bc},V3d{position:[k.cx+k.half_w,k.cy+k.half_h,cell_z],color:bc},V3d{position:[k.cx-k.half_w,k.cy+k.half_h,cell_z],color:bc}]);
                         o_idx.extend_from_slice(&[b,b+1,b+2,b,b+2,b+3]);
                     }
                     let o_vb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("OVB"),contents:bytemuck::cast_slice(&o_verts),usage:wgpu::BufferUsages::VERTEX});
                     let o_ib=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("OIB"),contents:bytemuck::cast_slice(&o_idx),usage:wgpu::BufferUsages::INDEX});
 
                     // Build text labels for ortho render
-                    let o_label_h=0.06f32;
+                    let o_label_h=0.055f32;
                     let o_label_w=o_label_h*(5.0/7.0);
                     let o_label_color=[1.0f32,0.95,0.7,1.0];
                     let o_label_z=cell_z+key_half+0.02;
                     let mut o_text_verts:Vec<TextVert>=Vec::new();
                     let mut o_text_idx:Vec<u16>=Vec::new();
                     for k in key_list.iter(){
+                        // Center text in the key (accounting for multi-char labels like "BS", "Ent")
+                        let label_len=k.label.len().max(1) as f32;
+                        let total_w=o_label_w*label_len;
                         let ch=k.label.bytes().next().unwrap_or(b'?');
-                        let lx=k.cx-o_label_w*0.5;
+                        let lx=k.cx-total_w*0.5+o_label_w*0.5;
                         let ly=k.cy+o_label_h*0.5;
                         let (mut cv,ci)=build_char_verts(ch,&atlas,lx,ly,o_label_z,o_label_w,o_label_h,o_label_color);
                         let base=o_text_verts.len() as u16;
@@ -514,27 +564,17 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
                                 //   scene_y = (1.0 - v*2.0)  (ortho normalized, Y up)
                                 let u=(hx+plane_hx)/(2.0*plane_hx);
                                 let v=(plane_hy-local_y)/(2.0*plane_hy);
-                                let onx=u*2.0-1.0; // ortho normalized x [-1,1]
-                                let ony=1.0-v*2.0; // ortho normalized y [-1,1]
-                                // Find the key whose center is closest in ortho-normalized space
-                                let mut best_dist=f32::INFINITY;
+                                // UV maps to ortho clip space [-1,1]. The ortho projection
+                                // maps world coords [-ortho_size/2, ortho_size/2] to clip [-1,1].
+                                // So world_x = (u*2-1) * (ortho_size/2), same for Y.
+                                let world_hx=(u*2.0-1.0)*ortho_half_x;
+                                let world_hy=(1.0-v*2.0)*ortho_half_y+key_cy;
+                                // Find the key that contains this world-space point
                                 for (ki,k) in key_list.iter().enumerate(){
-                                    // Normalize key center to ortho space
-                                    // The ortho cam at [0,0,0] yaw=-PI/2 pitch=0 looks along -Z
-                                    // with ortho(size=2, aspect=1). The view maps:
-                                    //   clip_x = world_x / 1.0  (since ortho half-width = 1)
-                                    //   clip_y = world_y / 1.0  (since ortho half-height = 1)
-                                    // So ortho_norm = world_pos for this camera
-                                    let kx=k.cx;
-                                    let ky=k.cy;
-                                    let dx=onx-kx;
-                                    let dy=ony-ky;
-                                    let dist=dx*dx+dy*dy;
-                                    // Check if within key half-extent (in ortho-normalized units)
-                                    let kh=key_half;
-                                    if dx.abs()<=kh&&dy.abs()<=kh&&dist<best_dist{
-                                        best_dist=dist;
+                                    if world_hx>=k.cx-k.half_w&&world_hx<=k.cx+k.half_w
+                                        &&world_hy>=k.cy-k.half_h&&world_hy<=k.cy+k.half_h{
                                         hovered_key=Some(ki);
+                                        break;
                                     }
                                 }
                             }
@@ -545,7 +585,7 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
                 // Direct key hit test (screen-space AABB for ortho, ray-AABB for perspective)
                 if is_ortho{
                     for (ki,k) in key_list.iter().enumerate(){
-                        let corners=[[k.cx-key_half,k.cy-key_half,cell_z],[k.cx+key_half,k.cy-key_half,cell_z],[k.cx+key_half,k.cy+key_half,cell_z],[k.cx-key_half,k.cy+key_half,cell_z]];
+                        let corners=[[k.cx-k.half_w,k.cy-k.half_h,cell_z],[k.cx+k.half_w,k.cy-k.half_h,cell_z],[k.cx+k.half_w,k.cy+k.half_h,cell_z],[k.cx-k.half_w,k.cy+k.half_h,cell_z]];
                         let mut sc_min=[1e20f32,1e20f32];let mut sc_max=[-1e20f32,-1e20f32];
                         for c in &corners{let cl=vp_to_clip(&vp_t,*c);if cl[3]<=0.0{continue;}let n=[cl[0]/cl[3],cl[1]/cl[3]];let sx=(n[0]+1.0)*0.5*log_w;let sy=(1.0-n[1])*0.5*log_h;sc_min[0]=sc_min[0].min(sx);sc_min[1]=sc_min[1].min(sy);sc_max[0]=sc_max[0].max(sx);sc_max[1]=sc_max[1].max(sy);}
                         if mouse_pos[0]>=sc_min[0]&&mouse_pos[0]<=sc_max[0]&&mouse_pos[1]>=sc_min[1]&&mouse_pos[1]<=sc_max[1]{hovered_key=Some(ki);}
@@ -561,8 +601,7 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
                     let rd=normalize(sub(fw3,nw3));
                     let mut best_t=f32::INFINITY;
                     for (ki,k) in key_list.iter().enumerate(){
-                        let h=cube_half;
-                        let (a0,a1)=([k.cx-h,k.cy-h,cell_z-h],[k.cx+h,k.cy+h,cell_z+h]);
+                        let (a0,a1)=([k.cx-k.half_w,k.cy-k.half_h,cell_z-k.half_h],[k.cx+k.half_w,k.cy+k.half_h,cell_z+k.half_h]);
                         let (mut tmin,mut tmax)=(f32::NEG_INFINITY,f32::INFINITY);
                         let mut hit=true;
                         for i in 0..3{
@@ -580,11 +619,11 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
                     let is_c=clicked_key==Some(ki);
                     let bc=if is_c{[0.0f32,0.9,0.0]}else if is_h{[0.0,0.7,0.0]}else{[0.2,0.5,0.2]};
                     if is_ortho{
-                        let h=key_half;let b=all_verts.len() as u16;
-                        all_verts.extend_from_slice(&[V3d{position:[k.cx-h,k.cy-h,cell_z],color:bc},V3d{position:[k.cx+h,k.cy-h,cell_z],color:bc},V3d{position:[k.cx+h,k.cy+h,cell_z],color:bc},V3d{position:[k.cx-h,k.cy+h,cell_z],color:bc}]);
+                        let b=all_verts.len() as u16;
+                        all_verts.extend_from_slice(&[V3d{position:[k.cx-k.half_w,k.cy-k.half_h,cell_z],color:bc},V3d{position:[k.cx+k.half_w,k.cy-k.half_h,cell_z],color:bc},V3d{position:[k.cx+k.half_w,k.cy+k.half_h,cell_z],color:bc},V3d{position:[k.cx-k.half_w,k.cy+k.half_h,cell_z],color:bc}]);
                         all_idx.extend_from_slice(&[b,b+1,b+2,b,b+2,b+3]);
                     } else {
-                        let h=cube_half;let b=all_verts.len() as u16;
+                        let h=k.half_w.max(k.half_h).min(cube_half);let b=all_verts.len() as u16;
                         all_verts.extend_from_slice(&cube_verts(k.cx,k.cy,cell_z,h,bc));
                         all_idx.extend_from_slice(&cube_indices(b));
                     }
@@ -629,6 +668,28 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
                     let r0=V3d{position:[hx-border,py+hy,b],color:bc};let r1=V3d{position:[hx,py+hy,b],color:bc};let r2=V3d{position:[hx,py-hy,b],color:bc};let r3=V3d{position:[hx-border,py-hy,b],color:bc};
                     vec![t0,t1,t2,t0,t2,t3,b0,b1,b2,b0,b2,b3,l0,l1,l2,l0,l2,l3,r0,r1,r2,r0,r2,r3]
                 }else{vec![]};
+
+                // ── Typed text display above ortho plane ─────────────────
+                let display_char_h=0.08f32;
+                let display_char_w=display_char_h*(5.0/7.0);
+                let display_color=[0.9f32,0.9,0.9,1.0];
+                let display_z=plane_z+0.001;
+                let display_y=py+plane_hy+0.15; // above the ortho plane
+                let display_x_start=-plane_hx+0.05;
+                let mut display_verts:Vec<TextVert>=Vec::new();
+                let mut display_idx:Vec<u16>=Vec::new();
+                for (ci,ch) in typed_text.bytes().enumerate(){
+                    let lx=display_x_start+ci as f32*display_char_w;
+                    let ly=display_y+display_char_h*0.5;
+                    let (mut cv,ci)=build_char_verts(ch,&atlas,lx,ly,display_z,display_char_w,display_char_h,display_color);
+                    let base=display_verts.len() as u16;
+                    display_verts.append(&mut cv);
+                    for idx in &ci{display_idx.push(*idx+base);}
+                }
+                let (display_vb,display_ib)=if !display_verts.is_empty(){
+                    (Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("DVB"),contents:bytemuck::cast_slice(&display_verts),usage:wgpu::BufferUsages::VERTEX})),
+                     Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("DIB"),contents:bytemuck::cast_slice(&display_idx),usage:wgpu::BufferUsages::INDEX})))
+                }else{(None,None)};
 
                 // Uniforms & pipelines
                 let ub_buf=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("UB"),contents:bytemuck::cast_slice(&vp_t),usage:wgpu::BufferUsages::UNIFORM});
@@ -701,6 +762,12 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>,@lo
                         p.set_pipeline(&text_pipe);p.set_bind_group(0,&text_bg0,&[]);p.set_bind_group(1,&text_bg1,&[]);
                         p.set_vertex_buffer(0,text_vb.as_ref().unwrap().slice(..));p.set_index_buffer(text_ib.as_ref().unwrap().slice(..),wgpu::IndexFormat::Uint16);
                         p.draw_indexed(0..text_idx.len() as u32,0,0..1);
+                    }
+                    // Typed text display
+                    if display_vb.is_some()&&display_ib.is_some(){
+                        p.set_pipeline(&text_pipe);p.set_bind_group(0,&text_bg0,&[]);p.set_bind_group(1,&text_bg1,&[]);
+                        p.set_vertex_buffer(0,display_vb.as_ref().unwrap().slice(..));p.set_index_buffer(display_ib.as_ref().unwrap().slice(..),wgpu::IndexFormat::Uint16);
+                        p.draw_indexed(0..display_idx.len() as u32,0,0..1);
                     }
                 }
                 queue.submit(std::iter::once(enc.finish()));frame.present();window.request_redraw();
