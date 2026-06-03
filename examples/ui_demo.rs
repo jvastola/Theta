@@ -168,9 +168,10 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>}
     let plane_hy=total_size*0.7;
 
     // ── App state ──────────────────────────────────────────────────────
-    let mut camera=Camera{pos:[0.0,0.0,0.0],yaw:-std::f32::consts::FRAC_PI_2,pitch:0.0};
+    let mut camera=Camera{pos:[0.0,0.5,3.0],yaw:-std::f32::consts::FRAC_PI_2,pitch:0.15};
     let mut keys=std::collections::HashSet::<KeyCode>::new();
-    let mut is_ortho=true;
+    let mut is_ortho=false;
+    let mut hovered_plane=false;
     let mut mouse_cap=false;
     let mut o_was_pressed=false;
     let mut esc_was_pressed=false;
@@ -203,6 +204,7 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>}
                             if p&&!o_was_pressed{
                                 is_ortho=!is_ortho;
                                 if is_ortho{ camera.pos=[0.0,0.0,0.0]; camera.yaw=-std::f32::consts::FRAC_PI_2; camera.pitch=0.0; }
+                                else{ camera.pos=[0.0,0.5,3.0]; camera.yaw=-std::f32::consts::FRAC_PI_2; camera.pitch=0.15; }
                             }
                             o_was_pressed=p;
                         }
@@ -291,6 +293,72 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>}
 
                 // Hit test
                 hovered_cell=None;
+                hovered_plane=false;
+                // ── Window plane hit test → ray into ortho scene ──
+                {
+                    // Try to raycast onto the plane and, if hit, determine
+                    // which grid cell the ray intersects in the ortho scene.
+                    let mut hit_pos:Option<(f32,f32)>=None;
+
+                    if is_ortho{
+                        // Ortho main camera: project mouse through the VP
+                        let inv_vp2=inv_mat4(&vp);
+                        let ndc_x=(mouse_pos[0]/log_w)*2.0-1.0;let ndc_y=1.0-(mouse_pos[1]/log_h)*2.0;
+                        let nw=mat4_mul_vec4(&inv_vp2,[ndc_x,ndc_y,-1.0,1.0]);
+                        let fw=mat4_mul_vec4(&inv_vp2,[ndc_x,ndc_y,1.0,1.0]);
+                        let nw3=[nw[0]/nw[3],nw[1]/nw[3],nw[2]/nw[3]];
+                        let fw3=[fw[0]/fw[3],fw[1]/fw[3],fw[2]/fw[3]];
+                        let rd=normalize(sub(fw3,nw3));
+                        if rd[2].abs()>1e-8{
+                            let t=(plane_z-nw3[2])/rd[2];
+                            if t>0.0{
+                                let hx=nw3[0]+rd[0]*t;let hy=nw3[1]+rd[1]*t;
+                                if hx>=-plane_hx&&hx<=plane_hx&&hy>=-plane_hy&&hy<=plane_hy{
+                                    hit_pos=Some((hx,hy));
+                                }
+                            }
+                        }
+                    } else {
+                        // Perspective main camera: ray-plane intersection
+                        let inv_vp2=inv_mat4(&vp);
+                        let ndc_x=(mouse_pos[0]/log_w)*2.0-1.0;let ndc_y=1.0-(mouse_pos[1]/log_h)*2.0;
+                        let nw=mat4_mul_vec4(&inv_vp2,[ndc_x,ndc_y,-1.0,1.0]);
+                        let fw=mat4_mul_vec4(&inv_vp2,[ndc_x,ndc_y,1.0,1.0]);
+                        let nw3=[nw[0]/nw[3],nw[1]/nw[3],nw[2]/nw[3]];
+                        let fw3=[fw[0]/fw[3],fw[1]/fw[3],fw[2]/fw[3]];
+                        let rd=normalize(sub(fw3,nw3));
+                        if rd[2].abs()>1e-8{
+                            let t=(plane_z-nw3[2])/rd[2];
+                            if t>0.0{
+                                let hx=nw3[0]+rd[0]*t;let hy=nw3[1]+rd[1]*t;
+                                if hx>=-plane_hx&&hx<=plane_hx&&hy>=-plane_hy&&hy<=plane_hy{
+                                    hit_pos=Some((hx,hy));
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some((hx,hy))=hit_pos{
+                        hovered_plane=true;
+                        // Map hit point (hx, hy) on the plane to a grid cell.
+                        // The ortho scene places cell centers at:
+                        //   cx = grid_origin_x + col * (cell_size*2 + cell_gap)
+                        //   cy = grid_origin_y - row * (cell_size*2 + cell_gap)
+                        // Each cell spans [cx-cell_size, cx+cell_size] etc.
+                        let step=cell_size*2.0+cell_gap;
+                        let col_f=((hx-grid_origin_x+cell_size)/step).floor();
+                        let row_f=((grid_origin_y+cell_size-hy)/step).floor();
+                        if col_f>=0.0&&col_f<grid_n as f32&&row_f>=0.0&&row_f<grid_n as f32{
+                            let col=col_f as usize;let row=row_f as usize;
+                            let cx=grid_origin_x+col as f32*step;
+                            let cy=grid_origin_y-row as f32*step;
+                            if hx>=cx-cell_size&&hx<=cx+cell_size&&hy>=cy-cell_size&&hy<=cy+cell_size{
+                                hovered_cell=Some((row,col));
+                            }
+                        }
+                    }
+                }
+
                 if is_ortho{
                     for row in 0..grid_n{for col in 0..grid_n{
                         let cx=grid_origin_x+col as f32*(cell_size*2.0+cell_gap);
@@ -353,6 +421,23 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>}
                 ];
                 let plane_idx:&[u16]=&[0,1,2,0,2,3];
 
+                // Hover border for window plane (thin quad outline)
+                let border=0.015f32;
+                let border_verts:Vec<V3d>=if hovered_plane{
+                    let b=plane_z+0.001;
+                    let hx=plane_hx+border;let hy=plane_hy+border;
+                    let bc=[0.4f32,0.8,1.0];
+                    // Top edge
+                    let t0=V3d{position:[-hx,hy+border,b],color:bc};let t1=V3d{position:[hx,hy+border,b],color:bc};let t2=V3d{position:[hx,hy,b],color:bc};let t3=V3d{position:[-hx,hy,b],color:bc};
+                    // Bottom edge
+                    let b0=V3d{position:[-hx,-hy,b],color:bc};let b1=V3d{position:[hx,-hy,b],color:bc};let b2=V3d{position:[hx,-hy-border,b],color:bc};let b3=V3d{position:[-hx,-hy-border,b],color:bc};
+                    // Left edge
+                    let l0=V3d{position:[-hx,hy,b],color:bc};let l1=V3d{position:[-hx+border,hy,b],color:bc};let l2=V3d{position:[-hx+border,-hy,b],color:bc};let l3=V3d{position:[-hx,-hy,b],color:bc};
+                    // Right edge
+                    let r0=V3d{position:[hx-border,hy,b],color:bc};let r1=V3d{position:[hx,hy,b],color:bc};let r2=V3d{position:[hx,-hy,b],color:bc};let r3=V3d{position:[hx-border,-hy,b],color:bc};
+                    vec![t0,t1,t2,t0,t2,t3,b0,b1,b2,b0,b2,b3,l0,l1,l2,l0,l2,l3,r0,r1,r2,r0,r2,r3]
+                }else{vec![]};
+
                 // Uniforms & pipelines
                 let ub_buf=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("UB"),contents:bytemuck::cast_slice(&vp_t),usage:wgpu::BufferUsages::UNIFORM});
                 let bgl0=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:Some("BGL0"),entries:&[wgpu::BindGroupLayoutEntry{binding:0,visibility:wgpu::ShaderStages::VERTEX,ty:wgpu::BindingType::Buffer{ty:wgpu::BufferBindingType::Uniform,has_dynamic_offset:false,min_binding_size:None},count:None}]});
@@ -386,6 +471,7 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>}
                 let ib=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("IB"),contents:bytemuck::cast_slice(&all_idx),usage:wgpu::BufferUsages::INDEX});
                 let pvb=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("PVB"),contents:bytemuck::cast_slice(&plane_verts),usage:wgpu::BufferUsages::VERTEX});
                 let pib=device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("PIB"),contents:bytemuck::cast_slice(plane_idx),usage:wgpu::BufferUsages::INDEX});
+                let bvb=if hovered_plane&&!border_verts.is_empty(){Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor{label:Some("BVB"),contents:bytemuck::cast_slice(&border_verts),usage:wgpu::BufferUsages::VERTEX}))}else{None};
 
                 // Create depth texture
                 let depth_tex=device.create_texture(&wgpu::TextureDescriptor{
@@ -407,6 +493,12 @@ struct VO{@builtin(position)clip_position:vec4<f32>,@location(0)uv:vec2<f32>}
                     p.set_pipeline(&tex_pipe);p.set_bind_group(0,&bg0,&[]);p.set_bind_group(1,&bg1,&[]);
                     p.set_vertex_buffer(0,pvb.slice(..));p.set_index_buffer(pib.slice(..),wgpu::IndexFormat::Uint16);
                     p.draw_indexed(0..plane_idx.len() as u32,0,0..1);
+                    // Hover border
+                    if let Some(ref bvb)=bvb{
+                        p.set_pipeline(&color_pipe);p.set_bind_group(0,&bg0,&[]);
+                        p.set_vertex_buffer(0,bvb.slice(..));
+                        p.draw(0..border_verts.len() as u32,0..1);
+                    }
                 }
                 queue.submit(std::iter::once(enc.finish()));frame.present();window.request_redraw();
             }
